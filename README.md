@@ -75,11 +75,11 @@ Notably, we show that time series analysis (e.g., forecasting) can be cast as ye
 - tqdm==4.65.0
 - peft==0.4.0
 - transformers==4.31.0
-- deepspeed==0.13.0
 
 To install all dependencies:
 ```
 pip install -r requirements.txt
+pip install deepspeed==0.13.0
 ```
 
 ## Datasets
