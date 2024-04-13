@@ -1,4 +1,4 @@
 # all file under dataset, this is a gitingore file
 dataset/
 *.pyc
-
+wandb/
