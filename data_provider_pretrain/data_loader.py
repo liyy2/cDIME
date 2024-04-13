@@ -8,6 +8,8 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 
 warnings.filterwarnings('ignore')
+import tqdm
+
 
 
 class Dataset_ETT_hour(Dataset):
@@ -227,7 +229,7 @@ class DatasetPerIndividual(Dataset):
     def __init__(self, df, individual_id, flag='train', size=None,
                  features='S', data_path='ETTh1.csv',
                  target='OT', scale=True, timeenc=0, freq='h', train_percent=100, val_percent = 0,
-                 seasonal_patterns=None):
+                 seasonal_patterns=None, time_column = 'DateTime', covariates = None):
         if size == None:
             self.seq_len = 24 * 4 * 4
             self.label_len = 24 * 4
@@ -250,16 +252,16 @@ class DatasetPerIndividual(Dataset):
         self.train_percent = train_percent
         self.val_percent = val_percent
 
-        self.df = df
         self.data_path = data_path
-        self.__read_data__()
-
+        self.time_column = time_column
+        self.__read_data__(df)
         self.enc_in = self.data_x.shape[-1]
         self.tot_len = len(self.data_x) - self.seq_len - self.pred_len + 1
+        self.covariates = covariates
 
-    def __read_data__(self):
+    def __read_data__(self, df):
         self.scaler = StandardScaler()
-        df_raw = self.df
+        df_raw = df
 
         '''
         df_raw.columns: ['date', ...(other features), target feature]
@@ -294,16 +296,16 @@ class DatasetPerIndividual(Dataset):
         else:
             data = df_data.values
 
-        df_stamp = df_raw[['LBDTC']][border1:border2]
-        df_stamp['LBDTC'] = pd.to_datetime(df_stamp['LBDTC'])
+        df_stamp = df_raw[[self.time_column]][border1:border2]
+        df_stamp[self.time_column] = pd.to_datetime(df_stamp[self.time_column])
         if self.timeenc == 0:
-            df_stamp['month'] = df_stamp['LBDTC'].apply(lambda row: row.month, 1)
-            df_stamp['day'] = df_stamp['LBDTC'].apply(lambda row: row.day, 1)
-            df_stamp['weekday'] = df_stamp['LBDTC'].apply(lambda row: row.weekday(), 1)
-            df_stamp['hour'] = df_stamp['LBDTC'].apply(lambda row: row.hour, 1)
-            data_stamp = df_stamp.drop(['LBDTC'], 1).values
+            df_stamp['month'] = df_stamp[self.time_column].apply(lambda row: row.month, 1)
+            df_stamp['day'] = df_stamp[self.time_column].apply(lambda row: row.day, 1)
+            df_stamp['weekday'] = df_stamp[self.time_column].apply(lambda row: row.weekday(), 1)
+            df_stamp['hour'] = df_stamp[self.time_column].apply(lambda row: row.hour, 1)
+            data_stamp = df_stamp.drop([self.time_column], 1).values
         elif self.timeenc == 1:
-            data_stamp = time_features(pd.to_datetime(df_stamp['LBDTC'].values), freq=self.freq)
+            data_stamp = time_features(pd.to_datetime(df_stamp[self.time_column].values), freq=self.freq)
             data_stamp = data_stamp.transpose(1, 0)
 
         self.data_x = data[border1:border2]
@@ -333,8 +335,13 @@ class DatasetPerIndividual(Dataset):
 class Dataset_Combined(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='Glucose.csv',
-                 target='OT', scale=True, timeenc=0, freq='h', train_percent=70, val_percent = 20, partition = 'chronological', normalization = 'global',
-                 seasonal_patterns=None, gap_tolerance = '1 hour'):
+                 target='OT', scale=True, timeenc=0, freq='h', train_percent=70, val_percent = 20, 
+                 partition = 'chronological', normalization = 'global',
+                 seasonal_patterns=None, 
+                 gap_tolerance = '1 hour', 
+                 time_column = 'DateTime', 
+                 enable_covariates = False, 
+                 cov_path = 'final_dm.csv', ):
         if size == None:
             self.seq_len = 24 * 4 * 4
             self.label_len = 24 * 4
@@ -362,6 +369,12 @@ class Dataset_Combined(Dataset):
         self.data_path = data_path
         self.partition = partition
         self.normalization = normalization
+        self.time_column = time_column
+        self.enable_covariates = enable_covariates
+        self.cov_path = cov_path
+
+        if self.enable_covariates:
+            self.covariates = pd.read_csv(os.path.join(self.root_path, self.cov_path))
         if partition == 'individual':
         # Partition the individual IDs
             train_ids, val_ids, test_ids = self.__partition_individuals(train_percent, val_percent)
@@ -393,20 +406,31 @@ class Dataset_Combined(Dataset):
     
     def __read_data__(self):
         df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
-        # reorder columns
-        df_raw = df_raw[['LBDTC', 'USUBJID'] + [col for col in df_raw.columns if col not in ['LBDTC','USUBJID']]]
+        # sanity checks
+        assert 'USUBJID' in df_raw.columns, 'USUBJID column not found in the dataset'
+        assert self.target in df_raw.columns, 'Target column not found in the dataset'
+        assert self.time_column in df_raw.columns, 'Time column not found in the dataset'
+        # reorder columns into Time, USUBJID, features_column, target_column
+        df_raw = df_raw[[self.time_column, 'USUBJID'] + [col for col in df_raw.columns if col not in [self.time_column,'USUBJID', self.target]] + [self.target]]
         if self.normalization == 'global' and self.scale: #TODO: Global normalization is not correct here as it is taking into account the test set
             self.scaler = StandardScaler()
             to_be_scaled = df_raw[[self.target]] if self.features == 'S' else df_raw.iloc[:,2:]
             new_data = self.scaler.fit_transform(to_be_scaled)
-            df_raw.iloc[:, 2:] = new_data
+            if self.features == 'S':
+                df_raw[self.target] = new_data
+            else:
+                df_raw.iloc[:, 2:] = new_data
         
-
-        for individual_id in self.ids:
+        
+        print('Loading data into memory...')
+        for individual_id in tqdm.tqdm(self.ids):
             df_per_indiv = df_raw[df_raw['USUBJID'] == individual_id]
+            covariates = self.covariates[self.covariates['USUBJID'] == individual_id] if self.enable_covariates else None
+            # turn covariates into a dictionary
+            covariates = covariates.to_dict(orient='records')[0] if covariates is not None else None
             # turn the time column into a datetime object
-            df_per_indiv['LBDTC'] = pd.to_datetime(df_per_indiv['LBDTC'])
-            time_diff = df_per_indiv['LBDTC'].diff() > pd.Timedelta(self.gap_tolerance)
+            df_per_indiv[self.time_column] = pd.to_datetime(df_per_indiv[self.time_column])
+            time_diff = df_per_indiv[self.time_column].diff() > pd.Timedelta(self.gap_tolerance)
             groups = time_diff.cumsum()
             list_of_dfs = [group_df for _, group_df in df_per_indiv.groupby(groups)]
             # filter out the groups that are too short
@@ -417,15 +441,16 @@ class Dataset_Combined(Dataset):
             for df_split in list_of_dfs:
                 if self.partition == 'individual':
                     self.datasets.append(DatasetPerIndividual(df_split, individual_id, 'train', self.size, self.features, self.data_path,
-                                                             self.target, self.scale if self.normalization =='individual' else False, self.timeenc,
-                                                             self.freq, 100, 0))
+                                                            self.target, self.scale if self.normalization =='individual' else False, self.timeenc,
+                                                            self.freq, 100, 0, time_column=self.time_column, covariates = covariates))
                 elif self.partition == 'chronological':
                     self.datasets.append(DatasetPerIndividual(df_split, individual_id, self.flag, self.size, self.features, self.data_path,
-                                                             self.target, self.scale if self.normalization =='individual' else False, self.timeenc,
-                                                             self.freq, self.train_percent, self.val_percent))
+                                                            self.target, self.scale if self.normalization =='individual' else False, self.timeenc,
+                                                            self.freq, self.train_percent, self.val_percent, time_column=self.time_column, covariates = covariates))
                 else:
                     raise ValueError('Invalid partition type: {}'.format(self.partition))
-        
+
+
     def __len__(self):
         # sum the lengths of all datasets
         return sum([len(dataset) for dataset in self.datasets])
@@ -437,6 +462,8 @@ class Dataset_Combined(Dataset):
         dataset_idx = np.where(index >= dataset_cumsum)[0][-1]
         # find the index within the dataset
         dataset_index = index - dataset_cumsum[dataset_idx]
+        if self.enable_covariates:
+            return self.datasets[dataset_idx].__getitem__(dataset_index), self.datasets[dataset_idx].covariates
         # get the item from the dataset
         return self.datasets[dataset_idx].__getitem__(dataset_index)
 
