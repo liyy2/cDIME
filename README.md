@@ -80,6 +80,7 @@ To install all dependencies:
 ```
 pip install -r requirements.txt
 pip install deepspeed==0.13.0
+pip install sentencepiece
 ```
 
 ## Datasets
