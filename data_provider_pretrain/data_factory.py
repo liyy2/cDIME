@@ -26,10 +26,16 @@ def data_provider(args, data, data_path, pretrain=True, flag='train'):
         batch_size = args.batch_size
         freq = args.freq
     if data == 'Glucose':
-        data_set = Dataset_Combined(root_path='/home/yl2428/Time-LLM/dataset/glucose', 
+        data_set = Dataset_Combined(root_path=args.root_path, 
                             flag=flag, 
-                            target='LBSTRESN', 
-                            size=[args.seq_len, args.label_len, args.pred_len], normalization='global')
+                            data_path= args.data_path,
+                            target='Glucose', 
+                            size=[args.seq_len, args.label_len, args.pred_len], 
+                            normalization='global', 
+                            features=args.features, 
+                            enable_covariates=args.enable_covariates,
+                            num_individuals=args.num_individuals,)
+
     else:
         data_set = Data(
             root_path=args.root_path,

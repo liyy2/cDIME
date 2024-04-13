@@ -12,6 +12,7 @@ import time
 import random
 import numpy as np
 import os
+import wandb
 
 os.environ['CURL_CA_BUNDLE'] = ''
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:64"
@@ -26,19 +27,19 @@ torch.manual_seed(fix_seed)
 np.random.seed(fix_seed)
 
 # basic config
-parser.add_argument('--task_name', type=str, required=True, default='long_term_forecast',
+parser.add_argument('--task_name', type=str, required=False, default='long_term_forecast',
                     help='task name, options:[long_term_forecast, short_term_forecast, imputation, classification, anomaly_detection]')
-parser.add_argument('--is_training', type=int, required=True, default=1, help='status')
-parser.add_argument('--model_id', type=str, required=True, default='test', help='model id')
-parser.add_argument('--model_comment', type=str, required=True, default='none', help='prefix when saving test results')
-parser.add_argument('--model', type=str, required=True, default='Autoformer',
+parser.add_argument('--is_training', type=int, required=False, default=1, help='status')
+parser.add_argument('--model_id', type=str, required=False, default='test', help='model id')
+parser.add_argument('--model_comment', type=str, required=False, default='none', help='prefix when saving test results')
+parser.add_argument('--model', type=str, required=False, default='Autoformer',
                     help='model name, options: [Autoformer, DLinear]')
 parser.add_argument('--seed', type=int, default=2021, help='random seed')
 
 # data loader
-parser.add_argument('--data_pretrain', type=str, required=True, default='ETTm1', help='dataset type')
-parser.add_argument('--data', type=str, required=True, default='ETTm1', help='dataset type')
-parser.add_argument('--root_path', type=str, default='./dataset', help='root path of the data file')
+parser.add_argument('--data_pretrain', type=str, required=False, default='ETTm1', help='dataset type')
+parser.add_argument('--data', type=str, required=False, default='ETTm1', help='dataset type')
+parser.add_argument('--root_path', type=str, default='/home/yl2428/Time-LLM/dataset', help='root path of the data file')
 parser.add_argument('--data_path', type=str, default='ETTh1.csv', help='data file')
 parser.add_argument('--data_path_pretrain', type=str, default='ETTh1.csv', help='data file')
 parser.add_argument('--features', type=str, default='M',
@@ -97,12 +98,19 @@ parser.add_argument('--pct_start', type=float, default=0.2, help='pct_start')
 parser.add_argument('--use_amp', action='store_true', help='use automatic mixed precision training', default=False)
 parser.add_argument('--llm_layers', type=int, default=6)
 parser.add_argument('--percent', type=int, default=100)
+parser.add_argument('--wandb_key', type=str, default='6f1080f993d5d7ad6103e69ef57dd9291f1bf366')
+parser.add_argument('--num_individuals', type=int, default=-1)
+parser.add_argument('--enable_covariates', type=bool, default=False)
+
+
 
 args = parser.parse_args()
 ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
 deepspeed_plugin = DeepSpeedPlugin(hf_ds_config='./ds_config_zero2.json')
 accelerator = Accelerator(kwargs_handlers=[ddp_kwargs], deepspeed_plugin=deepspeed_plugin)
-
+wandb.login(key = args.wandb_key)
+wandb.init(config=args,
+               project='Time-LLM GLucose')
 for ii in range(args.itr):
     # setting record of experiments
     setting = '{}_{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_{}_{}'.format(
@@ -125,7 +133,7 @@ for ii in range(args.itr):
 
     train_data, train_loader = data_provider(args, args.data_pretrain, args.data_path_pretrain, True, 'train')
     vali_data, vali_loader = data_provider(args, args.data_pretrain, args.data_path_pretrain, True, 'val')
-    test_data, test_loader = data_provider(args, args.data, args.data_path, False, 'test')
+    test_data, test_loader = data_provider(args, args.data_pretrain, args.data_path_pretrain, False, 'test')
 
     if args.model == 'Autoformer':
         model = Autoformer.Model(args).float()
@@ -170,6 +178,7 @@ for ii in range(args.itr):
     if args.use_amp:
         scaler = torch.cuda.amp.GradScaler()
 
+    steps = 0
     for epoch in range(args.train_epochs):
         iter_count = 0
         train_loss = []
@@ -178,6 +187,7 @@ for ii in range(args.itr):
         epoch_time = time.time()
         for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
             iter_count += 1
+            steps += 1
             model_optim.zero_grad()
 
             batch_x = batch_x.float().to(accelerator.device)
@@ -215,7 +225,7 @@ for ii in range(args.itr):
                 batch_y = batch_y[:, -args.pred_len:, f_dim:]
                 loss = criterion(outputs, batch_y)
                 train_loss.append(loss.item())
-
+            
             if (i + 1) % 100 == 0:
                 accelerator.print(
                     "\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
@@ -224,6 +234,9 @@ for ii in range(args.itr):
                 accelerator.print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
                 iter_count = 0
                 time_now = time.time()
+            
+            # wandb log
+            wandb.log({"Train Loss Per Step": loss.item()}, step = steps)
 
             if args.use_amp:
                 scaler.scale(loss).backward()
@@ -238,12 +251,22 @@ for ii in range(args.itr):
                 scheduler.step()
 
         accelerator.print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
+
         train_loss = np.average(train_loss)
+        wandb.log({"Train Loss Per Epoch": train_loss}, step = epoch + 1)
+
         vali_loss, vali_mae_loss = vali(args, accelerator, model, vali_data, vali_loader, criterion, mae_metric)
-        test_loss, test_mae_loss = vali(args, accelerator, model, test_data, test_loader, criterion, mae_metric)
+        wandb.log({"Vali Loss Per Epoch": vali_loss, "Vali MAE Loss Per Epoch": vali_mae_loss}, step = epoch + 1)
+
         accelerator.print(
-            "Epoch: {0} | Train Loss: {1:.7f} Vali Loss: {2:.7f} Test Loss: {3:.7f} MAE Loss: {4:.7f}".format(
-                epoch + 1, train_loss, vali_loss, test_loss, test_mae_loss))
+                "Epoch: {0} | Train Loss: {1:.7f} Vali Loss: {2:.7f}".format(
+                    epoch + 1, train_loss, vali_loss))
+        if epoch % 10 == 0:
+            test_loss, test_mae_loss = vali(args, accelerator, model, test_data, test_loader, criterion, mae_metric)
+            accelerator.print(
+                "Epoch: {0} | Train Loss: {1:.7f} Vali Loss: {2:.7f} Test Loss: {3:.7f} MAE Loss: {4:.7f}".format(
+                    epoch + 1, train_loss, vali_loss, test_loss, test_mae_loss))
+            wandb.log({"Test Loss Per Epoch": test_loss, "Test MAE Loss Per Epoch": test_mae_loss}, step = epoch + 1)
 
         early_stopping(vali_loss, model, path)
         if early_stopping.early_stop:

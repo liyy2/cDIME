@@ -27,18 +27,18 @@ torch.manual_seed(fix_seed)
 np.random.seed(fix_seed)
 
 # basic config
-parser.add_argument('--task_name', type=str, required=True, default='long_term_forecast',
+parser.add_argument('--task_name', type=str, required=False, default='long_term_forecast',
                     help='task name, options:[long_term_forecast, short_term_forecast, imputation, classification, anomaly_detection]')
-parser.add_argument('--is_training', type=int, required=True, default=1, help='status')
-parser.add_argument('--model_id', type=str, required=True, default='test', help='model id')
-parser.add_argument('--model_comment', type=str, required=True, default='none', help='prefix when saving test results')
-parser.add_argument('--model', type=str, required=True, default='Autoformer',
+parser.add_argument('--is_training', type=int, required=False, default=1, help='status')
+parser.add_argument('--model_id', type=str, required=False, default='test', help='model id')
+parser.add_argument('--model_comment', type=str, required=False, default='none', help='prefix when saving test results')
+parser.add_argument('--model', type=str, required=False, default='Autoformer',
                     help='model name, options: [Autoformer, DLinear]')
 parser.add_argument('--seed', type=int, default=2021, help='random seed')
 
 # data loader
-parser.add_argument('--data', type=str, required=True, default='ETTm1', help='dataset type')
-parser.add_argument('--root_path', type=str, default='./dataset', help='root path of the data file')
+parser.add_argument('--data', type=str, required=False, default='ETTm1', help='dataset type')
+parser.add_argument('--root_path', type=str, default='/home/yl2428/Time-LLM/dataset/ETT-small', help='root path of the data file')
 parser.add_argument('--data_path', type=str, default='ETTh1.csv', help='data file')
 parser.add_argument('--features', type=str, default='M',
                     help='forecasting task, options:[M, S, MS]; '

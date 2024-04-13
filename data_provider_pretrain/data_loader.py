@@ -341,7 +341,7 @@ class Dataset_Combined(Dataset):
                  gap_tolerance = '1 hour', 
                  time_column = 'DateTime', 
                  enable_covariates = False, 
-                 cov_path = 'final_dm.csv', ):
+                 cov_path = 'final_dm.csv', num_individuals = -1):
         if size == None:
             self.seq_len = 24 * 4 * 4
             self.label_len = 24 * 4
@@ -372,6 +372,8 @@ class Dataset_Combined(Dataset):
         self.time_column = time_column
         self.enable_covariates = enable_covariates
         self.cov_path = cov_path
+
+        self.num_individuals = num_individuals
 
         if self.enable_covariates:
             self.covariates = pd.read_csv(os.path.join(self.root_path, self.cov_path))
@@ -421,7 +423,9 @@ class Dataset_Combined(Dataset):
             else:
                 df_raw.iloc[:, 2:] = new_data
         
-        
+        if self.num_individuals >= 0: # -1 means all individuals
+            self.ids = self.ids[:self.num_individuals]
+
         print('Loading data into memory...')
         for individual_id in tqdm.tqdm(self.ids):
             df_per_indiv = df_raw[df_raw['USUBJID'] == individual_id]
