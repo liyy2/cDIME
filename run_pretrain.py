@@ -100,17 +100,19 @@ parser.add_argument('--llm_layers', type=int, default=6)
 parser.add_argument('--percent', type=int, default=100)
 parser.add_argument('--wandb_key', type=str, default='6f1080f993d5d7ad6103e69ef57dd9291f1bf366')
 parser.add_argument('--num_individuals', type=int, default=-1)
-parser.add_argument('--enable_covariates', type=bool, default=False)
+parser.add_argument('--enable_covariates', type=int, default=0)
+parser.add_argument('--gradient_accumulation_steps', type=int, default=1)
 
 
 
 args = parser.parse_args()
 ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
 deepspeed_plugin = DeepSpeedPlugin(hf_ds_config='./ds_config_zero2.json')
-accelerator = Accelerator(kwargs_handlers=[ddp_kwargs], deepspeed_plugin=deepspeed_plugin)
-wandb.login(key = args.wandb_key)
-wandb.init(config=args,
-               project='Time-LLM GLucose')
+accelerator = Accelerator(kwargs_handlers=[ddp_kwargs], deepspeed_plugin=deepspeed_plugin, log_with='wandb')
+accelerator.init_trackers(
+    project_name="Glucose", 
+    config=args,
+    )
 for ii in range(args.itr):
     # setting record of experiments
     setting = '{}_{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_{}_{}'.format(
@@ -158,7 +160,7 @@ for ii in range(args.itr):
         if p.requires_grad is True:
             trained_parameters.append(p)
 
-    model_optim = optim.Adam(trained_parameters, lr=args.learning_rate)
+    model_optim = optim.AdamW(trained_parameters, lr=args.learning_rate, weight_decay=1e-4)
 
     if args.lradj == 'COS':
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(model_optim, T_max=20, eta_min=1e-8)
@@ -185,11 +187,16 @@ for ii in range(args.itr):
 
         model.train()
         epoch_time = time.time()
-        for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
+        for i, (data) in enumerate(train_loader):
+            if args.enable_covariates:
+                batch_x, batch_y, batch_x_mark, batch_y_mark = data[0]
+                batch_cov = data[1]
+            else:
+                batch_x, batch_y, batch_x_mark, batch_y_mark = data 
+                batch_cov = None
             iter_count += 1
             steps += 1
             model_optim.zero_grad()
-
             batch_x = batch_x.float().to(accelerator.device)
             batch_y = batch_y.float().to(accelerator.device)
             batch_x_mark = batch_x_mark.float().to(accelerator.device)
@@ -205,9 +212,9 @@ for ii in range(args.itr):
             if args.use_amp:
                 with torch.cuda.amp.autocast():
                     if args.output_attention:
-                        outputs = model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                        outputs = model(batch_x, batch_x_mark, dec_inp, batch_y_mark, batch_cov)[0]
                     else:
-                        outputs = model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                        outputs = model(batch_x, batch_x_mark, dec_inp, batch_y_mark, batch_cov)
 
                     f_dim = -1 if args.features == 'MS' else 0
                     outputs = outputs[:, -args.pred_len:, f_dim:]
@@ -216,9 +223,9 @@ for ii in range(args.itr):
                     train_loss.append(loss.item())
             else:
                 if args.output_attention:
-                    outputs = model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                    outputs = model(batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates =  batch_cov)[0]
                 else:
-                    outputs = model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    outputs = model(batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates =  batch_cov)
 
                 f_dim = -1 if args.features == 'MS' else 0
                 outputs = outputs[:, -args.pred_len:, f_dim:]
@@ -235,8 +242,9 @@ for ii in range(args.itr):
                 iter_count = 0
                 time_now = time.time()
             
-            # wandb log
-            wandb.log({"Train Loss Per Step": loss.item()}, step = steps)
+            accelerator.log({"Train Loss Per Step": loss.item()}, step = steps)
+            accelerator.log({"Learning Rate": model_optim.param_groups[0]['lr']}, step = steps)
+            accelerator.log({'Average Train Loss Per Step': np.average(train_loss)}, step = steps)
 
             if args.use_amp:
                 scaler.scale(loss).backward()
@@ -253,10 +261,10 @@ for ii in range(args.itr):
         accelerator.print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
 
         train_loss = np.average(train_loss)
-        wandb.log({"Train Loss Per Epoch": train_loss}, step = epoch + 1)
+        accelerator.log({"Train Loss Per Epoch": train_loss}, step = epoch + 1)
 
         vali_loss, vali_mae_loss = vali(args, accelerator, model, vali_data, vali_loader, criterion, mae_metric)
-        wandb.log({"Vali Loss Per Epoch": vali_loss, "Vali MAE Loss Per Epoch": vali_mae_loss}, step = epoch + 1)
+        accelerator.log({"Vali Loss Per Epoch": vali_loss, "Vali MAE Loss Per Epoch": vali_mae_loss}, step = epoch + 1)
 
         accelerator.print(
                 "Epoch: {0} | Train Loss: {1:.7f} Vali Loss: {2:.7f}".format(
