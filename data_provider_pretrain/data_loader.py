@@ -226,11 +226,11 @@ class Dataset_ETT_minute(Dataset):
 
 
 class DatasetPerIndividual(Dataset):
-    def __init__(self, df, individual_id, flag='train', size=None,
+    def __init__(self, df, individual_id, flag='train', size=None, stride=1,
                  features='S', data_path='ETTh1.csv',
-                 target='OT', scale=True, timeenc=0, freq='h', train_percent=100, val_percent = 0,
-                 seasonal_patterns=None, time_column = 'DateTime', covariates = None):
-        if size == None:
+                 target='OT', scale=True, timeenc=0, freq='h', train_percent=100, val_percent=0,
+                 seasonal_patterns=None, time_column='DateTime', covariates=None):
+        if size is None:
             self.seq_len = 24 * 4 * 4
             self.label_len = 24 * 4
             self.pred_len = 24 * 4
@@ -238,7 +238,8 @@ class DatasetPerIndividual(Dataset):
             self.seq_len = size[0]
             self.label_len = size[1]
             self.pred_len = size[2]
-        # init
+
+        # Initialize other parameters
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
         self.individual_id = individual_id
@@ -254,19 +255,18 @@ class DatasetPerIndividual(Dataset):
 
         self.data_path = data_path
         self.time_column = time_column
+        self.stride = stride
+
         self.__read_data__(df)
         self.enc_in = self.data_x.shape[-1]
-        self.tot_len = len(self.data_x) - self.seq_len - self.pred_len + 1
+        self.tot_len = (len(self.data_x) - self.seq_len - self.pred_len) // self.stride + 1
         self.covariates = covariates
 
     def __read_data__(self, df):
         self.scaler = StandardScaler()
         df_raw = df
 
-        '''
-        df_raw.columns: ['date', ...(other features), target feature]
-        '''
-        # drop the individual ID column
+        # Drop the individual ID column
         df_raw = df_raw.drop('USUBJID', axis=1)
 
         cols = list(df_raw.columns)
@@ -281,7 +281,7 @@ class DatasetPerIndividual(Dataset):
         border2 = border2s[self.set_type]
 
         if self.set_type == 0:
-            border2 = (border2 - self.seq_len)+ self.seq_len
+            border2 = (border2 - self.seq_len) + self.seq_len
 
         if self.features == 'M' or self.features == 'MS':
             cols_data = df_raw.columns[1:]
@@ -313,12 +313,11 @@ class DatasetPerIndividual(Dataset):
         self.data_stamp = data_stamp
 
     def __getitem__(self, index):
-        # feat_id = index // self.tot_len
-        s_begin = index % self.tot_len
-
+        s_begin = index * self.stride
         s_end = s_begin + self.seq_len
         r_begin = s_end - self.label_len
         r_end = r_begin + self.label_len + self.pred_len
+
         seq_x = self.data_x[s_begin:s_end, :]
         seq_y = self.data_y[r_begin:r_end, :]
         seq_x_mark = self.data_stamp[s_begin:s_end]
@@ -327,7 +326,7 @@ class DatasetPerIndividual(Dataset):
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 
     def __len__(self):
-        return (len(self.data_x) - self.seq_len - self.pred_len + 1) 
+        return (len(self.data_x) - self.seq_len - self.pred_len) // self.stride + 1
 
     def inverse_transform(self, data):
         return self.scaler.inverse_transform(data)
@@ -341,7 +340,7 @@ class Dataset_Combined(Dataset):
                  gap_tolerance = '1 hour', 
                  time_column = 'DateTime', 
                  enable_covariates = False, 
-                 cov_path = 'final_dm.csv', num_individuals = -1):
+                 cov_path = 'final_dm.csv', num_individuals = -1, stride = 1):
         if size == None:
             self.seq_len = 24 * 4 * 4
             self.label_len = 24 * 4
@@ -374,6 +373,7 @@ class Dataset_Combined(Dataset):
         self.cov_path = cov_path
 
         self.num_individuals = num_individuals
+        self.stride = stride
 
         if self.enable_covariates:
             self.covariates = pd.read_csv(os.path.join(self.root_path, self.cov_path))
@@ -449,11 +449,11 @@ class Dataset_Combined(Dataset):
             # Create a dataset for each split DataFrame
             for df_split in list_of_dfs:
                 if self.partition == 'individual':
-                    self.datasets.append(DatasetPerIndividual(df_split, individual_id, 'train', self.size, self.features, self.data_path,
+                    self.datasets.append(DatasetPerIndividual(df_split, individual_id, 'train', self.size, self.stride, self.features, self.data_path,
                                                             self.target, self.scale if self.normalization =='individual' else False, self.timeenc,
-                                                            self.freq, 100, 0, time_column=self.time_column, covariates = covariates))
+                                                            self.freq, 100, 0, time_column=self.time_column, covariates = covariates, ))
                 elif self.partition == 'chronological':
-                    self.datasets.append(DatasetPerIndividual(df_split, individual_id, self.flag, self.size, self.features, self.data_path,
+                    self.datasets.append(DatasetPerIndividual(df_split, individual_id, self.flag, self.size, self.stride, self.features, self.data_path,
                                                             self.target, self.scale if self.normalization =='individual' else False, self.timeenc,
                                                             self.freq, self.train_percent, self.val_percent, time_column=self.time_column, covariates = covariates))
                 else:
