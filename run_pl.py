@@ -25,6 +25,7 @@ np.random.seed(fix_seed)
 
 
 # basic config
+parser.add_argument('--num_nodes', type=int, default=1, help='number of nodes for gpu')
 parser.add_argument('--task_name', type=str, required=False, default='long_term_forecast',
                     help='task name, options:[long_term_forecast, short_term_forecast, imputation, classification, anomaly_detection]')
 parser.add_argument('--is_training', type=int, required=False, default=1, help='status')
@@ -105,6 +106,7 @@ parser.add_argument('--wandb_group', type=str, default=None, help='wandb group')
 parser.add_argument('--wandb_api_key', type=str, default='6f1080f993d5d7ad6103e69ef57dd9291f1bf366')
 
 
+
 args = parser.parse_args()
 for ii in range(args.itr):
 
@@ -155,6 +157,7 @@ for ii in range(args.itr):
 
     trainer = pl.Trainer(
         max_epochs=args.train_epochs,
+        num_nodes=args.num_nodes,
         accelerator='auto',
         strategy='deepspeed' if args.use_deep_speed else 'ddp',
         logger=wandb_logger,
