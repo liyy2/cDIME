@@ -11,7 +11,7 @@ import random
 import numpy as np
 import os
 import wandb
-
+from datetime import timedelta
 os.environ['CURL_CA_BUNDLE'] = ''
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:64"
 
@@ -33,7 +33,6 @@ parser.add_argument('--model_id', type=str, required=False, default='test', help
 parser.add_argument('--model_comment', type=str, required=False, default='none', help='prefix when saving test results')
 parser.add_argument('--model', type=str, required=False, default='Autoformer',
                     help='model name, options: [Autoformer, DLinear]')
-parser.add_argument('--seed', type=int, default=2021, help='random seed')
 parser.add_argument('--precision', type=str, default='bf16', help='precision')
 # data loader
 parser.add_argument('--data_pretrain', type=str, required=False, default='ETTm1', help='dataset type')
@@ -51,7 +50,7 @@ parser.add_argument('--freq', type=str, default='h',
                     help='freq for time features encoding, '
                          'options:[s:secondly, t:minutely, h:hourly, d:daily, b:business days, w:weekly, m:monthly], '
                          'you can also use more detailed freq like 15min or 3h')
-parser.add_argument('--checkpoints', type=str, default='./checkpoints/', help='location of model checkpoints')
+parser.add_argument('--checkpoints', type=str, default='/gpfs/gibbs/pi/gerstein/yl2428/checkpoints/', help='location of model checkpoints')
 parser.add_argument('--log_dir', type=str, default='/gpfs/gibbs/pi/gerstein/yl2428/logs', help='location of log')
 # forecasting task
 parser.add_argument('--seq_len', type=int, default=96, help='input sequence length')
@@ -87,7 +86,7 @@ parser.add_argument('--align_epochs', type=int, default=10, help='alignment epoc
 parser.add_argument('--ema_decay', type=float, default=0.995, help='ema decay')
 parser.add_argument('--batch_size', type=int, default=32, help='batch size of train input data')
 parser.add_argument('--eval_batch_size', type=int, default=8, help='batch size of model evaluation')
-parser.add_argument('--patience', type=int, default=5, help='early stopping patience')
+parser.add_argument('--patience', type=int, default=10, help='early stopping patience')
 parser.add_argument('--learning_rate', type=float, default=0.0001, help='optimizer learning rate')
 parser.add_argument('--des', type=str, default='test', help='exp description')
 parser.add_argument('--loss', type=str, default='MSE', help='loss function')
@@ -109,11 +108,9 @@ parser.add_argument('--wandb_api_key', type=str, default='6f1080f993d5d7ad6103e6
 
 args = parser.parse_args()
 for ii in range(args.itr):
-
     train_data, train_loader = data_provider(args, args.data_pretrain, args.data_path_pretrain, True, 'train')
     vali_data, vali_loader = data_provider(args, args.data_pretrain, args.data_path_pretrain, True, 'val')
     test_data, test_loader = data_provider(args, args.data_pretrain, args.data_path_pretrain, False, 'test')
-
     model = TimeSeriesModel(args, train_loader, vali_loader, test_loader)
     callbacks = []
     callbacks.append(EarlyStopping("val_loss", patience=args.patience))
@@ -123,17 +120,16 @@ for ii in range(args.itr):
     callbacks.append(ModelCheckpoint(
         dirpath=args.log_dir,
         monitor="val_loss",
-        save_top_k=10,  # -1 to save all
+        save_top_k=1,  # -1 to save all
         filename="{step}-{epoch}-{val_loss:.4f}-{train_per_step:.4f}",
         save_last=True,
     ))
 
     callbacks.append(ModelCheckpoint(
         dirpath=args.log_dir,
-        save_top_k=1,  # -1 to save all
-        filename="{step}-{epoch}-{train_per_step:.4f}",
-        every_n_train_steps=10000,
-        save_last=True,
+        train_time_interval=timedelta(hours=2), # 2 hours safeguard
+        filename="time-checkpoint-{step}"
+
     ))
     # logger    
     # wandb is project/group/name format to save all the log
@@ -144,6 +140,9 @@ for ii in range(args.itr):
                                 group = args.wandb_group,
                                 settings=wandb.Settings(start_method='fork', code_dir="."),
                                 config=args,
+                                save_dir=args.log_dir,
+                                dir=args.log_dir,
+                                log_model=True,
                                 )
     else:
         wandb_logger = None
@@ -167,8 +166,7 @@ for ii in range(args.itr):
         default_root_dir='./checkpoints',
         gradient_clip_val=0.5,
         gradient_clip_algorithm='norm',
-        accumulate_grad_batches=args.gradient_accumulation_steps,
-        val_check_interval=0.2,)
+        accumulate_grad_batches=args.gradient_accumulation_steps)
 
     trainer.fit(model, train_loader, vali_loader)
     trainer.test(model, test_loader)
