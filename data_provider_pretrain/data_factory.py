@@ -32,6 +32,7 @@ def data_provider(args, data, data_path, pretrain=True, flag='train'):
                             target='Glucose', 
                             size=[args.seq_len, args.label_len, args.pred_len], 
                             normalization='global', 
+                            freq=args.freq,
                             features=args.features, 
                             enable_covariates=args.enable_covariates,
                             num_individuals=args.num_individuals,)
@@ -52,7 +53,7 @@ def data_provider(args, data, data_path, pretrain=True, flag='train'):
         )
     data_loader = DataLoader(
         data_set,
-        batch_size=batch_size,
+        batch_size=batch_size // args.num_nodes,
         shuffle=shuffle_flag,
         num_workers=args.num_workers,
         drop_last=drop_last)

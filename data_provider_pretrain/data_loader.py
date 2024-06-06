@@ -228,7 +228,7 @@ class Dataset_ETT_minute(Dataset):
 class DatasetPerIndividual(Dataset):
     def __init__(self, df, individual_id, flag='train', size=None, stride=1,
                  features='S', data_path='ETTh1.csv',
-                 target='OT', scale=True, timeenc=0, freq='h', train_percent=100, val_percent=0,
+                 target='OT', scale=True, timeenc=1, freq='t', train_percent=100, val_percent=0,
                  seasonal_patterns=None, time_column='DateTime', covariates=None):
         if size is None:
             self.seq_len = 24 * 4 * 4
@@ -334,7 +334,7 @@ class DatasetPerIndividual(Dataset):
 class Dataset_Combined(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='Glucose.csv',
-                 target='OT', scale=True, timeenc=0, freq='h', train_percent=70, val_percent = 20, 
+                 target='OT', scale=True, timeenc=1, freq='t', train_percent=70, val_percent = 20, 
                  partition = 'chronological', normalization = 'global',
                  seasonal_patterns=None, 
                  gap_tolerance = '1 hour', 
@@ -418,6 +418,8 @@ class Dataset_Combined(Dataset):
             self.scaler = StandardScaler()
             to_be_scaled = df_raw[[self.target]] if self.features == 'S' else df_raw.iloc[:,2:]
             new_data = self.scaler.fit_transform(to_be_scaled)
+            # print the mean and std of the target column
+            print(f'Target column mean: {self.scaler.mean_[0]}, std: {self.scaler.scale_[0]}')
             if self.features == 'S':
                 df_raw[self.target] = new_data
             else:

@@ -21,7 +21,10 @@ fix_seed = 2021
 random.seed(fix_seed)
 torch.manual_seed(fix_seed)
 np.random.seed(fix_seed)
-
+torch.cuda.manual_seed(fix_seed)
+torch.cuda.manual_seed_all(fix_seed)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 
 # basic config
@@ -33,10 +36,9 @@ parser.add_argument('--model_id', type=str, required=False, default='test', help
 parser.add_argument('--model_comment', type=str, required=False, default='none', help='prefix when saving test results')
 parser.add_argument('--model', type=str, required=False, default='Autoformer',
                     help='model name, options: [Autoformer, DLinear]')
-parser.add_argument('--precision', type=str, default='bf16', help='precision')
+parser.add_argument('--precision', type=str, default='32', help='precision')
 # data loader
 parser.add_argument('--data_pretrain', type=str, required=False, default='ETTm1', help='dataset type')
-parser.add_argument('--data', type=str, required=False, default='ETTm1', help='dataset type')
 parser.add_argument('--root_path', type=str, default='/home/yl2428/Time-LLM/dataset', help='root path of the data file')
 parser.add_argument('--data_path', type=str, default='ETTh1.csv', help='data file')
 parser.add_argument('--data_path_pretrain', type=str, default='ETTh1.csv', help='data file')
@@ -46,7 +48,7 @@ parser.add_argument('--features', type=str, default='M',
                          'MS:multivariate predict univariate')
 parser.add_argument('--target', type=str, default='OT', help='target feature in S or MS task')
 parser.add_argument('--loader', type=str, default='modal', help='dataset type')
-parser.add_argument('--freq', type=str, default='h',
+parser.add_argument('--freq', type=str, default='t',
                     help='freq for time features encoding, '
                          'options:[s:secondly, t:minutely, h:hourly, d:daily, b:business days, w:weekly, m:monthly], '
                          'you can also use more detailed freq like 15min or 3h')
@@ -57,10 +59,11 @@ parser.add_argument('--seq_len', type=int, default=96, help='input sequence leng
 parser.add_argument('--label_len', type=int, default=48, help='start token length')
 parser.add_argument('--pred_len', type=int, default=96, help='prediction sequence length')
 parser.add_argument('--seasonal_patterns', type=str, default='Monthly', help='subset for M4')
+parser.add_argument('--stride', type=int, default=8, help='stride in dataset construction')
 # model define
-parser.add_argument('--enc_in', type=int, default=7, help='encoder input size')
-parser.add_argument('--dec_in', type=int, default=7, help='decoder input size')
-parser.add_argument('--c_out', type=int, default=7, help='output size')
+parser.add_argument('--enc_in', type=int, default=3, help='encoder input size')
+parser.add_argument('--dec_in', type=int, default=3, help='decoder input size')
+parser.add_argument('--c_out', type=int, default=1, help='output size')
 parser.add_argument('--d_model', type=int, default=16, help='dimension of model')
 parser.add_argument('--n_heads', type=int, default=8, help='num of heads')
 parser.add_argument('--e_layers', type=int, default=2, help='num of encoder layers')
@@ -74,7 +77,6 @@ parser.add_argument('--embed', type=str, default='timeF',
 parser.add_argument('--activation', type=str, default='gelu', help='activation')
 parser.add_argument('--output_attention', action='store_true', help='whether to output attention in ecoder')
 parser.add_argument('--patch_len', type=int, default=16, help='patch length')
-parser.add_argument('--stride', type=int, default=8, help='stride')
 parser.add_argument('--prompt_domain', type=int, default=0, help='')
 parser.add_argument('--llm_model', type=str, default='LLAMA', help='LLM model') # LLAMA, GPT2, BERT
 parser.add_argument('--llm_dim', type=int, default='4096', help='LLM model dimension')# LLama7b:4096; GPT2-small:768; BERT-base:768
@@ -156,7 +158,7 @@ for ii in range(args.itr):
 
     trainer = pl.Trainer(
         max_epochs=args.train_epochs,
-        num_nodes=args.num_nodes,
+        devices=args.num_nodes,
         accelerator='auto',
         strategy='deepspeed' if args.use_deep_speed else 'ddp',
         logger=wandb_logger,
