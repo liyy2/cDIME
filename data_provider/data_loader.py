@@ -432,10 +432,8 @@ class DatasetPerIndividual(Dataset):
     def __read_data__(self, df):
         self.scaler = StandardScaler()
         df_raw = df
-
         # Drop the individual ID column
         df_raw = df_raw.drop('USUBJID', axis=1)
-
         cols = list(df_raw.columns)
         cols.remove(self.target)
         df_raw = df_raw[cols + [self.target]]
@@ -502,7 +500,7 @@ class Dataset_Combined(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='Glucose.csv',
                  target='OT', scale=True, timeenc=0, freq='h', train_percent=70, val_percent = 20, partition = 'chronological', normalization = 'global',
-                 seasonal_patterns=None, gap_tolerance = '1 hour', stride = 1):
+                 seasonal_patterns=None, gap_tolerance = '1 hr', stride = 1):
         if size == None:
             self.seq_len = 24 * 4 * 4
             self.label_len = 24 * 4
@@ -579,7 +577,7 @@ class Dataset_Combined(Dataset):
             groups = time_diff.cumsum()
             list_of_dfs = [group_df for _, group_df in df_per_indiv.groupby(groups)]
             # filter out the groups that are too short
-            list_of_dfs = [group_df for group_df in list_of_dfs if len(group_df) > 2 * (self.seq_len + self.pred_len)]
+            list_of_dfs = [group_df for group_df in list_of_dfs if len(group_df) > 3 * (self.seq_len + self.pred_len)]
 
 
             # Create a dataset for each split DataFrame

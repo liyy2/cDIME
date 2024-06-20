@@ -337,7 +337,7 @@ class Dataset_Combined(Dataset):
                  target='OT', scale=True, timeenc=1, freq='t', train_percent=70, val_percent = 20, 
                  partition = 'chronological', normalization = 'global',
                  seasonal_patterns=None, 
-                 gap_tolerance = '1 hour', 
+                 gap_tolerance = '5 minute', 
                  time_column = 'DateTime', 
                  enable_covariates = False, 
                  cov_path = 'final_dm.csv', num_individuals = -1, stride = 1):

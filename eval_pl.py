@@ -118,66 +118,18 @@ for ii in range(args.itr):
     train_data, train_loader = data_provider(args, args.data_pretrain, args.data_path_pretrain, True, 'train')
     vali_data, vali_loader = data_provider(args, args.data_pretrain, args.data_path_pretrain, True, 'val')
     test_data, test_loader = data_provider(args, args.data_pretrain, args.data_path_pretrain, False, 'test')
-    model = TimeSeriesModel(args, train_loader, vali_loader, test_loader)
     callbacks = []
-    callbacks.append(EarlyStopping("val_loss", patience=args.patience))
-    if args.ema_decay!=1:
-        callbacks.append(EMA(decay=args.ema_decay, deep_speed=args.use_deep_speed))
-    callbacks.append(LearningRateMonitor(logging_interval='step'))
 
-    # logger    
-    # wandb is project/group/name format to save all the log
-    if args.wandb:
-        wandb.login(key=args.wandb_api_key, relogin=True)
-        wandb_logger = WandbLogger(
-                                project='Glucose Forecasting',
-                                group = args.wandb_group,
-                                settings=wandb.Settings(start_method='fork', code_dir="."),
-                                config=args,
-                                save_dir=args.log_dir,
-                                dir=args.log_dir,
-                                log_model=True,
-                                )
-    else:
-        wandb_logger = None
-        
-    run_name = wandb_logger.experiment.name if wandb_logger else time.strftime('%Y-%m-%d-%H-%M-%S')
-    print(run_name)
-    checkpoint_path = os.path.join(args.log_dir, args.model, str(run_name), 'checkpoints')
-    callbacks.append(ModelCheckpoint(
-        dirpath=checkpoint_path,
-        monitor="val_loss",
-        save_top_k=1,  # -1 to save all
-        filename="{epoch}-{step}-{val_loss:.4f}",
-        save_last=True,
-    ))
-
-    callbacks.append(ModelCheckpoint(
-        dirpath=checkpoint_path,
-        train_time_interval=timedelta(hours=2), # 2 hours safeguard
-        filename="time-checkpoint-{step}"
-    ))
-    # login into wandb
-
-    if args.precision == '32':
-        #ENABLE TENSOR CORES
-       torch.set_float32_matmul_precision('high') # set from highest to high
-    # ddp_plugin = None
+    model = TimeSeriesModel(args, train_loader, vali_loader, test_loader)
+    # callbacks.append(ModelCheckpoint(
+    #     dirpath='/gpfs/gibbs/pi/gerstein/yl2428/logs/DLinearMoE/fragrant-tree-74/checkpoints',
+    # ))
 
     trainer = pl.Trainer(
-        max_epochs=args.train_epochs,
-        devices=args.num_nodes,
         accelerator='auto',
         strategy='deepspeed' if args.use_deep_speed else 'ddp',
-        logger=wandb_logger,
-        callbacks=callbacks,
         precision=args.precision,
-        enable_checkpointing=True,
-        gradient_clip_val=0.5,
-        gradient_clip_algorithm='norm',
-        accumulate_grad_batches=args.gradient_accumulation_steps, 
-        default_root_dir=checkpoint_path)
+        enable_checkpointing=True,)
 
-    trainer.fit(model, train_loader, vali_loader)
     # load checkpoint
-    trainer.test(model, test_loader)
+    trainer.test(model, test_loader, ckpt_path='/gpfs/gibbs/pi/gerstein/yl2428/logs/DLinearMoE/fragrant-tree-74/checkpoints/last.ckpt/')

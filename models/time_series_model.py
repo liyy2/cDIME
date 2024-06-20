@@ -2,13 +2,14 @@
 import torch
 from torch import nn, optim
 from torch.optim import lr_scheduler
-from models import Autoformer, DLinear, TimeLLM
+from models import Autoformer, DLinear, TimeLLM, DLinearChannelMix, DLinearMoE
 import pytorch_lightning as pl
 
 
 class TimeSeriesModel(pl.LightningModule):
     def __init__(self, args, train_loader=None, val_loader=None, test_loader=None):
         super().__init__()
+        self.save_hyperparameters()
         self.args = args
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -16,8 +17,8 @@ class TimeSeriesModel(pl.LightningModule):
         
         if args.model == 'Autoformer':
             self.model = Autoformer.Model(args).float()
-        elif args.model == 'DLinear':
-            self.model = DLinear.Model(args).float()
+        elif args.model.startswith('DLinear'):
+            self.model = eval(args.model).Model(args).float()
         else:
             self.model = TimeLLM.Model(args).float()
         
@@ -92,6 +93,7 @@ class TimeSeriesModel(pl.LightningModule):
 
         self.log("test_loss", loss)
         self.log("test_mae_loss", mae_loss)
+        # 
 
     def train_dataloader(self):
         return self.train_loader

@@ -24,7 +24,6 @@ class Model(nn.Module):
         self.decompsition = series_decomp(configs.moving_avg)
         self.individual = individual
         self.channels = configs.enc_in
-
         if self.individual:
             self.Linear_Seasonal = nn.ModuleList()
             self.Linear_Trend = nn.ModuleList()
