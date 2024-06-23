@@ -2,7 +2,7 @@
 import torch
 from torch import nn, optim
 from torch.optim import lr_scheduler
-from models import Autoformer, DLinear, TimeLLM, DLinearChannelMix, DLinearMoE
+from models import Autoformer, DLinear, TimeLLM, DLinearChannelMix, DLinearMoE, TimeMixer, DLinearMoECov
 import pytorch_lightning as pl
 
 
@@ -18,6 +18,8 @@ class TimeSeriesModel(pl.LightningModule):
         if args.model == 'Autoformer':
             self.model = Autoformer.Model(args).float()
         elif args.model.startswith('DLinear'):
+            self.model = eval(args.model).Model(args).float()
+        elif args.model.startswith('TimeMixer'):
             self.model = eval(args.model).Model(args).float()
         else:
             self.model = TimeLLM.Model(args).float()
@@ -91,8 +93,18 @@ class TimeSeriesModel(pl.LightningModule):
         loss = self.criterion(outputs, batch_y)
         mae_loss = self.mae_metric(outputs, batch_y)
 
+        mae_loss_0 = self.mae_metric(outputs[:, 0:self.args.pred_len//4, :], batch_y[:, 0:self.args.pred_len//4, :])
+        mae_loss_1 = self.mae_metric(outputs[:, self.args.pred_len//4:self.args.pred_len//2, :], batch_y[:, self.args.pred_len//4:self.args.pred_len//2, :])
+        mae_loss_2 = self.mae_metric(outputs[:, self.args.pred_len//2:3*self.args.pred_len//4, :], batch_y[:, self.args.pred_len//2:3*self.args.pred_len//4, :])
+        mae_loss_3 = self.mae_metric(outputs[:, 3*self.args.pred_len//4:, :], batch_y[:, 3*self.args.pred_len//4:, :])
+
+
         self.log("test_loss", loss)
         self.log("test_mae_loss", mae_loss)
+        self.log("test_mae_loss_0", mae_loss_0)
+        self.log("test_mae_loss_1", mae_loss_1)
+        self.log("test_mae_loss_2", mae_loss_2)
+        self.log("test_mae_loss_3", mae_loss_3)
         # 
 
     def train_dataloader(self):

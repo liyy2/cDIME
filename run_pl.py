@@ -12,6 +12,7 @@ import numpy as np
 import os
 import wandb
 from datetime import timedelta
+from utils.clean_args import clean_args
 os.environ['CURL_CA_BUNDLE'] = ''
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:64"
 
@@ -99,6 +100,7 @@ parser.add_argument('--llm_layers', type=int, default=6)
 parser.add_argument('--percent', type=int, default=100)
 parser.add_argument('--num_individuals', type=int, default=-1)
 parser.add_argument('--enable_covariates', type=int, default=0)
+parser.add_argument('--cov_type', type=str, choices=['text', 'tensor'], default='tensor')
 parser.add_argument('--gradient_accumulation_steps', type=int, default=1)
 parser.add_argument('--use_deep_speed', type=int, default=1)
 # wandb
@@ -108,6 +110,22 @@ parser.add_argument('--wandb_api_key', type=str, default='6f1080f993d5d7ad6103e6
 parser.add_argument('--num_heads', type=str, default=8)
 parser.add_argument('--head_dropout', type=float, default=0.1)
 
+# TimeMixer-specific parameters
+parser.add_argument('--p_hidden_dims', type=int, nargs='+', default=[128, 128],
+                    help='hidden layer dimensions of projector (List)')
+parser.add_argument('--p_hidden_layers', type=int, default=2, help='number of hidden layers in projector')
+parser.add_argument('--channel_independence', type=int, default=0,
+                    help='0: channel dependence 1: channel independence for FreTS model')
+parser.add_argument('--decomp_method', type=str, default='moving_avg',
+                    help='method of series decompsition, only support moving_avg or dft_decomp')
+parser.add_argument('--use_norm', type=int, default=1, help='whether to use normalize; True 1 False 0')
+parser.add_argument('--down_sampling_layers', type=int, default=2, help='num of down sampling layers')
+parser.add_argument('--down_sampling_window', type=int, default=1, help='down sampling window size')
+parser.add_argument('--down_sampling_method', type=str, default='avg',
+                    help='down sampling method, only support avg, max, conv')
+parser.add_argument('--use_future_temporal_feature', type=int, default=0,
+                    help='whether to use future_temporal_feature; True 1 False 0')
+
 
 
 
@@ -115,9 +133,9 @@ parser.add_argument('--head_dropout', type=float, default=0.1)
 
 args = parser.parse_args()
 for ii in range(args.itr):
-    train_data, train_loader = data_provider(args, args.data_pretrain, args.data_path_pretrain, True, 'train')
-    vali_data, vali_loader = data_provider(args, args.data_pretrain, args.data_path_pretrain, True, 'val')
-    test_data, test_loader = data_provider(args, args.data_pretrain, args.data_path_pretrain, False, 'test')
+    train_data, train_loader, args = data_provider(args, args.data_pretrain, args.data_path_pretrain, True, 'train')
+    vali_data, vali_loader, args = data_provider(args, args.data_pretrain, args.data_path_pretrain, True, 'val')
+    test_data, test_loader, args = data_provider(args, args.data_pretrain, args.data_path_pretrain, False, 'test')
     model = TimeSeriesModel(args, train_loader, vali_loader, test_loader)
     callbacks = []
     callbacks.append(EarlyStopping("val_loss", patience=args.patience))
@@ -140,7 +158,7 @@ for ii in range(args.itr):
                                 )
     else:
         wandb_logger = None
-        
+    args = clean_args(args)
     run_name = wandb_logger.experiment.name if wandb_logger else time.strftime('%Y-%m-%d-%H-%M-%S')
     print(run_name)
     checkpoint_path = os.path.join(args.log_dir, args.model, str(run_name), 'checkpoints')

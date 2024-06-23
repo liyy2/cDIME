@@ -1,7 +1,10 @@
 from torch.utils.data import DataLoader
 
 from data_provider_pretrain.data_loader import Dataset_ETT_hour, Dataset_ETT_minute, Dataset_Combined
-
+import torch
+from torch_frame.utils import cat
+from torch.utils.data.dataloader import default_collate
+import numpy as np
 data_dict = {
     'ETTh1': Dataset_ETT_hour,
     'ETTh2': Dataset_ETT_hour,
@@ -10,6 +13,12 @@ data_dict = {
     'Glucose': Dataset_Combined,
 }
 
+def __build_collate_fn__(cov_frame):
+    def collate_fn(batch):
+        time_series, idx = default_collate(batch)
+        covariates = cov_frame[idx]
+        return time_series, covariates
+    return collate_fn
 
 def data_provider(args, data, data_path, pretrain=True, flag='train'):
     Data = data_dict[data]
@@ -56,5 +65,9 @@ def data_provider(args, data, data_path, pretrain=True, flag='train'):
         batch_size=batch_size // args.num_nodes,
         shuffle=shuffle_flag,
         num_workers=args.num_workers,
-        drop_last=drop_last)
-    return data_set, data_loader
+        drop_last=drop_last, 
+        collate_fn=__build_collate_fn__(data_set.processed_covariates.tensor_frame) if (args.enable_covariates and args.cov_type =='tensor') else None)
+    if args.enable_covariates and args.cov_type == 'tensor':
+        args.col_names_dict = data_set.processed_covariates.tensor_frame.col_names_dict
+        args.col_stats = data_set.processed_covariates.col_stats
+    return data_set, data_loader, args

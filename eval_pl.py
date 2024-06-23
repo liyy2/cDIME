@@ -80,6 +80,15 @@ parser.add_argument('--patch_len', type=int, default=16, help='patch length')
 parser.add_argument('--prompt_domain', type=int, default=0, help='')
 parser.add_argument('--llm_model', type=str, default='LLAMA', help='LLM model') # LLAMA, GPT2, BERT
 parser.add_argument('--llm_dim', type=int, default='4096', help='LLM model dimension')# LLama7b:4096; GPT2-small:768; BERT-base:768
+parser.add_argument('--channel_independence', type=int, default=1,
+                    help='0: channel dependence 1: channel independence for FreTS model')
+parser.add_argument('--decomp_method', type=str, default='moving_avg',
+                    help='method of series decompsition, only support moving_avg or dft_decomp')
+parser.add_argument('--use_norm', type=int, default=1, help='whether to use normalize; True 1 False 0')
+parser.add_argument('--down_sampling_layers', type=int, default=0, help='num of down sampling layers')
+parser.add_argument('--down_sampling_window', type=int, default=1, help='down sampling window size')
+parser.add_argument('--down_sampling_method', type=str, default=None,
+                    help='down sampling method, only support avg, max, conv')
 # optimization
 parser.add_argument('--num_workers', type=int, default=10, help='data loader num workers')
 parser.add_argument('--itr', type=int, default=1, help='experiments times')
@@ -107,6 +116,7 @@ parser.add_argument('--wandb_group', type=str, default=None, help='wandb group')
 parser.add_argument('--wandb_api_key', type=str, default='6f1080f993d5d7ad6103e69ef57dd9291f1bf366')
 parser.add_argument('--num_heads', type=str, default=8)
 parser.add_argument('--head_dropout', type=float, default=0.1)
+parser.add_argument('--ckpt_path', type=str)
 
 
 
@@ -132,4 +142,4 @@ for ii in range(args.itr):
         enable_checkpointing=True,)
 
     # load checkpoint
-    trainer.test(model, test_loader, ckpt_path='/gpfs/gibbs/pi/gerstein/yl2428/logs/DLinearMoE/fragrant-tree-74/checkpoints/last.ckpt/')
+    trainer.test(model, test_loader, ckpt_path=args.ckpt_path)

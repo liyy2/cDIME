@@ -6,7 +6,8 @@ from utils.timefeatures import time_features
 import warnings
 import numpy as np
 from sklearn.model_selection import train_test_split
-
+import torch_frame
+from torch_frame.data import Dataset
 warnings.filterwarnings('ignore')
 import tqdm
 
@@ -229,7 +230,7 @@ class DatasetPerIndividual(Dataset):
     def __init__(self, df, individual_id, flag='train', size=None, stride=1,
                  features='S', data_path='ETTh1.csv',
                  target='OT', scale=True, timeenc=1, freq='t', train_percent=100, val_percent=0,
-                 seasonal_patterns=None, time_column='DateTime', covariates=None):
+                 seasonal_patterns=None, time_column='DateTime', covariates=None, cov_index=None):
         if size is None:
             self.seq_len = 24 * 4 * 4
             self.label_len = 24 * 4
@@ -261,6 +262,7 @@ class DatasetPerIndividual(Dataset):
         self.enc_in = self.data_x.shape[-1]
         self.tot_len = (len(self.data_x) - self.seq_len - self.pred_len) // self.stride + 1
         self.covariates = covariates
+        self.cov_index = cov_index
 
     def __read_data__(self, df):
         self.scaler = StandardScaler()
@@ -340,7 +342,7 @@ class Dataset_Combined(Dataset):
                  gap_tolerance = '5 minute', 
                  time_column = 'DateTime', 
                  enable_covariates = False, 
-                 cov_path = 'final_dm.csv', num_individuals = -1, stride = 1):
+                 cov_path = 'final_dm.csv', num_individuals = -1, stride = 1, cov_type = 'tensor'):
         if size == None:
             self.seq_len = 24 * 4 * 4
             self.label_len = 24 * 4
@@ -374,9 +376,11 @@ class Dataset_Combined(Dataset):
 
         self.num_individuals = num_individuals
         self.stride = stride
+        self.cov_type = cov_type
 
         if self.enable_covariates:
             self.covariates = pd.read_csv(os.path.join(self.root_path, self.cov_path))
+            self.covariates_preprocess()
         if partition == 'individual':
         # Partition the individual IDs
             train_ids, val_ids, test_ids = self.__partition_individuals(train_percent, val_percent)
@@ -389,6 +393,26 @@ class Dataset_Combined(Dataset):
 
         self.__read_data__()
     
+    def covariates_preprocess(self):
+        assert self.enable_covariates, 'Covariates are not enabled'
+        # Specify the stype of each column with a dictionary.
+        col_to_stype = {
+            "SEX": torch_frame.categorical, 
+            "RACE": torch_frame.categorical,
+            "ETHNIC": torch_frame.categorical, 
+            "ARMCD": torch_frame.categorical,
+            "insulin modality": torch_frame.categorical,
+            "AGE": torch_frame.numerical, 
+            "WEIGHT": torch_frame.numerical, 
+            "HEIGHT": torch_frame.numerical,
+            "HbA1c": torch_frame.numerical, 
+            "DIABETES_ONSET": torch_frame.numerical,
+        }
+        # Set "target" as the target column.
+        dataset = Dataset(self.covariates, col_to_stype=col_to_stype)
+        dataset.materialize() # tensorize the data
+        self.processed_covariates = dataset
+
 
     def __partition_individuals(self, train_percent, val_percent):
         df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
@@ -434,7 +458,9 @@ class Dataset_Combined(Dataset):
             covariates = self.covariates[self.covariates['USUBJID'] == individual_id] if self.enable_covariates else None
             # turn covariates into a dictionary
             covariates = covariates.to_dict(orient='records')[0] if covariates is not None else None
-
+            # get the exact index
+            idx = self.covariates[self.covariates['USUBJID'] == individual_id].index[0] if self.enable_covariates else None
+            cov_tensor_frame = self.processed_covariates[idx].tensor_frame if self.enable_covariates else None
             # covarites prompt
             if covariates is not None:
                 covariates['cov_str'] = f"This is an individual with type I diabetes. Here is the individual's basic information:\n" + str(covariates)
@@ -453,11 +479,11 @@ class Dataset_Combined(Dataset):
                 if self.partition == 'individual':
                     self.datasets.append(DatasetPerIndividual(df_split, individual_id, 'train', self.size, self.stride, self.features, self.data_path,
                                                             self.target, self.scale if self.normalization =='individual' else False, self.timeenc,
-                                                            self.freq, 100, 0, time_column=self.time_column, covariates = covariates, ))
+                                                            self.freq, 100, 0, time_column=self.time_column, covariates = covariates, cov_index = idx))
                 elif self.partition == 'chronological':
                     self.datasets.append(DatasetPerIndividual(df_split, individual_id, self.flag, self.size, self.stride, self.features, self.data_path,
                                                             self.target, self.scale if self.normalization =='individual' else False, self.timeenc,
-                                                            self.freq, self.train_percent, self.val_percent, time_column=self.time_column, covariates = covariates))
+                                                            self.freq, self.train_percent, self.val_percent, time_column=self.time_column, covariates = covariates, cov_index = idx))
                 else:
                     raise ValueError('Invalid partition type: {}'.format(self.partition))
 
@@ -473,10 +499,13 @@ class Dataset_Combined(Dataset):
         dataset_idx = np.where(index >= dataset_cumsum)[0][-1]
         # find the index within the dataset
         dataset_index = index - dataset_cumsum[dataset_idx]
-        if self.enable_covariates:
+        if self.enable_covariates and self.cov_type == 'text':
             return self.datasets[dataset_idx].__getitem__(dataset_index), self.datasets[dataset_idx].covariates
-        # get the item from the dataset
-        return self.datasets[dataset_idx].__getitem__(dataset_index)
+        elif self.enable_covariates and self.cov_type == 'tensor':
+            return self.datasets[dataset_idx].__getitem__(dataset_index), self.datasets[dataset_idx].cov_index
+        else:
+            # get the item from the dataset
+            return self.datasets[dataset_idx].__getitem__(dataset_index)
 
     def inverse_transform(self, data):
         return self.scaler.inverse_transform(data)
