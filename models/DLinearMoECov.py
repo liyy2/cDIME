@@ -11,6 +11,7 @@ import torch_frame
 from torch_frame import TensorFrame, stype
 from torch_frame.data.stats import StatType
 from torch_frame.nn.conv import TabTransformerConv
+from layers.Embed import PatchEmbedding
 from torch_frame.nn.encoder import (
     EmbeddingEncoder,
     LinearEncoder,
@@ -112,7 +113,7 @@ class Model(nn.Module):
         super(Model, self).__init__()
         
         
-        self.num_predictions = configs.num_heads
+        self.num_predictions = configs.num_experts
         
         self.seq_len = configs.seq_len
         self.pred_len = configs.pred_len
@@ -134,10 +135,16 @@ class Model(nn.Module):
             col_stats=configs.col_stats,
             col_names_dict=configs.col_names_dict,
         )
-        self.Linear_Seasonal = nn.Linear(self.seq_len,self.pred_len * self.num_predictions)
-        self.Linear_Trend = nn.Linear(self.seq_len,self.pred_len * self.num_predictions)
+        print(self.seq_len)
+        print(self.pred_len * self.num_predictions)
+        self.Linear_Seasonal = nn.Linear(self.seq_len, self.pred_len * self.num_predictions)
+        self.Linear_Trend = nn.Linear(self.seq_len, self.pred_len * self.num_predictions)
 
-        self.Linear_wearable =nn.Sequential(nn.Linear((self.channels - 1) * self.seq_len, 32),
+        # self.patch_embed = PatchEmbedding(
+        #     32, 12, 6, 0.0)
+
+        # self.patch_down_projections = nn.Linear
+        self.Linear_wearable = nn.Sequential(nn.Linear((self.channels - 1) * self.seq_len, 32),
                                             nn.ReLU(),
                                             nn.LayerNorm(32),
                                             nn.Linear(32, 32))
@@ -148,7 +155,7 @@ class Model(nn.Module):
             nn.ReLU(),
             nn.Linear(self.num_predictions, self.num_predictions)
         )
-        
+        # self.patch_nums = int((configs.seq_len - 12) / 6 + 2)
         self.head_dropout = HeadDropout(configs.head_dropout)
 
 
@@ -156,8 +163,11 @@ class Model(nn.Module):
         # x: [Batch, Input length, Channel]
         cov_embedding = self.cov_encoder(covariates)
         x_glucose = x_enc[:,:,-1].unsqueeze(-1)
+        x_glucose[:, 1:, :] = x_glucose[:, 1:, :] * 0
         x_wearable = x_enc[:,:,:-1]
         x_mark_initial = x_mark_enc[:,0] # Batch, MarkChannel
+        # x_wearable_patch, nvars = self.patch_embed(x_wearable.permute(0,2,1).contiguous())
+        # x_wearable_patch = x_wearable_patch.reshape(x_wearable_patch.shape[0] //nvars, nvars, x_wearable_patch.shape[1], -1)
 
         wearble_feature = self.Linear_wearable(x_wearable.reshape(-1, (self.channels - 1) * self.seq_len)) # Batch, 32
         x_mark_initial = torch.cat([x_mark_initial, wearble_feature, cov_embedding], dim=1) # Batch, MarkChannel + 32

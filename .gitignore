@@ -3,3 +3,5 @@ dataset/
 *.pyc
 wandb/
 *.out
+*.csv
+*.yaml

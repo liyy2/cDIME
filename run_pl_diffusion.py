@@ -1,7 +1,7 @@
 import argparse
 import torch
 from data_provider_pretrain.data_factory import data_provider
-from models.time_series_model import TimeSeriesModel
+from models.time_series_diffusion_model import TimeSeriesDiffusionModel
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 from utils.callbacks import EMA
@@ -111,9 +111,9 @@ parser.add_argument('--num_experts', type=int, default=8)
 parser.add_argument('--head_dropout', type=float, default=0.1)
 
 # TimeMixer-specific parameters
-parser.add_argument('--p_hidden_dims', type=int, nargs='+', default=[128, 128],
-                    help='hidden layer dimensions of projector (List)')
-parser.add_argument('--p_hidden_layers', type=int, default=2, help='number of hidden layers in projector')
+# parser.add_argument('--p_hidden_dims', type=int, nargs='+', default=[128, 128],
+#                     help='hidden layer dimensions of projector (List)')
+# parser.add_argument('--p_hidden_layers', type=int, default=2, help='number of hidden layers in projector')
 parser.add_argument('--channel_independence', type=int, default=0,
                     help='0: channel dependence 1: channel independence for FreTS model')
 parser.add_argument('--decomp_method', type=str, default='moving_avg',
@@ -128,6 +128,32 @@ parser.add_argument('--use_future_temporal_feature', type=int, default=0,
 
 
 
+#diffusion specific parameters 
+parser.add_argument('--k_z', type=float, default=1e-2, help='KL weight 1e-9')
+parser.add_argument('--k_cond', type=float, default=1, help='Condition weight')
+parser.add_argument('--d_z', type=int, default=8, help='KL weight')
+# de-stationary projector params
+parser.add_argument('--p_hidden_dims', type=int, nargs='+', default=[64, 64],
+                    help='hidden layer dimensions of projector (List)')
+parser.add_argument('--p_hidden_layers', type=int, default=2, help='number of hidden layers in projector')
+
+# CART related args
+parser.add_argument('--diffusion_config_dir', type=str, default='/home/yl2428/Time-LLM/models/model9_NS_transformer/configs/toy_8gauss.yml',
+                    help='')
+
+# parser.add_argument('--cond_pred_model_dir', type=str,
+#                     default='./checkpoints/cond_pred_model_pertrain_NS_Transformer/checkpoint.pth', help='')
+parser.add_argument('--cond_pred_model_pertrain_dir', type=str,
+                    default=None, help='')
+
+parser.add_argument('--CART_input_x_embed_dim', type=int, default=32, help='feature dim for x in diffusion model')
+parser.add_argument('--mse_timestep', type=int, default=0, help='')
+
+parser.add_argument('--MLP_diffusion_net', type=bool, default=False, help='use MLP or Unet')
+
+# Some args for Ax (all about diffusion part)
+parser.add_argument('--timesteps', type=int, default=1000, help='')
+
 
 
 
@@ -136,7 +162,7 @@ for ii in range(args.itr):
     train_data, train_loader, args = data_provider(args, args.data_pretrain, args.data_path_pretrain, True, 'train')
     vali_data, vali_loader, args = data_provider(args, args.data_pretrain, args.data_path_pretrain, True, 'val')
     test_data, test_loader, args = data_provider(args, args.data_pretrain, args.data_path_pretrain, False, 'test')
-    model = TimeSeriesModel(args, train_loader, vali_loader, test_loader)
+    model = TimeSeriesDiffusionModel(args, train_loader, vali_loader, test_loader)
     callbacks = []
     callbacks.append(EarlyStopping("val_loss", patience=args.patience))
     if args.ema_decay!=1:
