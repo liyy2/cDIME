@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+  
 
 
 class ConditionalLinear(nn.Module):
@@ -26,14 +27,19 @@ class ConditionalGuidedModel(nn.Module):
         n_steps = config.diffusion.timesteps + 1
         self.cat_x = config.model.cat_x
         self.cat_y_pred = config.model.cat_y_pred
-        data_dim = 6
+        data_dim = 2 * MTS_args.enc_in 
 
         self.lin1 = ConditionalLinear(data_dim, 128, n_steps)
         self.lin2 = ConditionalLinear(128, 128, n_steps)
         self.lin3 = ConditionalLinear(128, 128, n_steps)
-        self.lin4 = nn.Linear(128, 3)
+        self.lin4 = nn.Linear(128, MTS_args.c_out)
 
     def forward(self, x, y_t, y_0_hat, t):
+        # x size (batch * timesteps) * seq_len * data_dim (x is condition)
+        # y_t size (batch * timesteps) * pred_len * c_out
+        # y_0_hat size (batch * timesteps) * pred_len * c_out
+        # eps_pred batch * pred_len * c_out
+        # timestep
         if self.cat_x:
             if self.cat_y_pred:
                 eps_pred = torch.cat((y_t, y_0_hat), dim=-1)

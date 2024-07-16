@@ -1,9 +1,61 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+from typing import Any, Dict, List
+
+from torch import Tensor
+from torch.nn import Linear, Module, ModuleList
+
 from .ns_layers.Transformer_EncDec import Decoder, DecoderLayer, Encoder, EncoderLayer
 from .ns_layers.SelfAttention_Family import DSAttention, AttentionLayer
-from layers.Embed import DataEmbedding
 
+import torch_frame
+from torch_frame import TensorFrame, stype
+from torch_frame.data.stats import StatType
+from torch_frame.nn.conv import TabTransformerConv
+from layers.Embed import DataEmbedding, PatchEmbedding
+from torch_frame.nn.encoder import (
+    EmbeddingEncoder,
+    LinearEncoder,
+    StypeWiseFeatureEncoder,
+)
+
+
+class ExampleTransformer(nn.Module):
+    def __init__(
+        self,
+        channels: int,
+        out_channels: int,
+        num_layers: int,
+        num_heads: int,
+        col_stats: Dict[str, Dict[StatType, Any]],
+        col_names_dict: Dict[torch_frame.stype, List[str]],
+    ):
+        super().__init__()
+        self.encoder = StypeWiseFeatureEncoder(
+            out_channels=channels,
+            col_stats=col_stats,
+            col_names_dict=col_names_dict,
+            stype_encoder_dict={
+                stype.categorical: EmbeddingEncoder(),
+                stype.numerical: LinearEncoder()
+            },
+        )
+        self.tab_transformer_convs = ModuleList([
+            TabTransformerConv(
+                channels=channels,
+                num_heads=num_heads,
+            ) for _ in range(num_layers)
+        ])
+        self.decoder = Linear(channels, out_channels)
+
+    def forward(self, tf: TensorFrame) -> Tensor:
+        x, _ = self.encoder(tf)
+        for tab_transformer_conv in self.tab_transformer_convs:
+            x = tab_transformer_conv(x)
+        out = self.decoder(x.mean(dim=1))
+        return out
 
 class Projector(nn.Module):
     '''
@@ -106,7 +158,14 @@ class Model(nn.Module):
             nn.ReLU(),
             nn.Linear(configs.d_model, configs.d_model)
         )
-
+        self.cov_encoder = ExampleTransformer(
+            channels=32,
+            out_channels=configs.d_model,
+            num_layers=4,
+            num_heads=8,
+            col_stats=configs.col_stats,
+            col_names_dict=configs.col_names_dict,
+        )
         self.z_out = nn.Sequential(
             nn.Linear(configs.d_model, configs.d_model),
             nn.ReLU(),
@@ -133,8 +192,9 @@ class Model(nn.Module):
         return z
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
-                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None):
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, covariates=None):
 
+        cov_embedding = self.cov_encoder(covariates)
         x_raw = x_enc.clone().detach()
 
         # Normalization
@@ -151,6 +211,12 @@ class Model(nn.Module):
         # Model Inference
         enc_out = self.enc_embedding(x_enc, x_mark_enc)
         enc_out, attns = self.encoder(enc_out, attn_mask=enc_self_mask, tau=tau, delta=delta)
+
+        enc_out = enc_out + cov_embedding.unsqueeze(1)
+
+
+
+
 
         mean = self.z_mean(enc_out)
         logvar = self.z_logvar(enc_out)

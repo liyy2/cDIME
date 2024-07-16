@@ -6,6 +6,7 @@ from torch.optim import lr_scheduler
 from models.model9_NS_transformer.ns_models import ns_Transformer
 from models.model9_NS_transformer.diffusion_models import diffuMTS
 from models.model9_NS_transformer.diffusion_models.diffusion_utils import *
+from models import DLinearMoECov
 
 import numpy as np
 import torch
@@ -40,13 +41,21 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         self.val_loader = val_loader
         self.test_loader = test_loader
         self.model, self.cond_pred_model, self.cond_pred_model_train = self._build_model()
+        self.sample_outputs = []
         self.save_hyperparameters()
+
 
 
     def _build_model(self):
         model = diffuMTS.Model(self.args).float()
-        cond_pred_model = ns_Transformer.Model(self.args).float()
-        cond_pred_model_train = ns_Transformer.Model(self.args).float()
+        if self.args.model == 'DLinearMoECov':
+            cond_pred_model = DLinearMoECov.Model(self.args).float()
+            cond_pred_model_train = DLinearMoECov.Model(self.args).float()
+        elif self.args.model == 'ns_Transformer':
+            cond_pred_model = ns_Transformer.Model(self.args).float()
+            cond_pred_model_train = ns_Transformer.Model(self.args).float()
+        else:
+            raise ValueError('Model not supported')
         return model, cond_pred_model, cond_pred_model_train
 
 
@@ -63,6 +72,19 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
                                                 max_lr=self.args.learning_rate)
         return [optimizer], [scheduler]
 
+    def condition_model_forward(self, batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates=None):
+        if self.args.enable_covariates:
+            result = self.cond_pred_model(batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates=covariates)
+        else:
+            result = self.cond_pred_model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+        if isinstance(result, tuple):
+            y_0_hat_batch, KL_loss, z_sample = result[1:]
+        else:
+            y_0_hat_batch = result
+            KL_loss = torch.tensor(0).to(self.device)
+            z_sample = None
+        return y_0_hat_batch, KL_loss, z_sample
+
     def training_step(self, batch, batch_idx):
         if self.args.enable_covariates:
             batch_x, batch_y, batch_x_mark, batch_y_mark = batch[0]
@@ -76,59 +98,29 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
         # sample time steps of size batch_size
+        f_dim = -1 if self.args.features == 'MS' else 0
         n = batch_x.size(0)
         t = torch.randint(low=0, high=self.model.num_timesteps, size=(n // 2 + 1,)).to(self.device)
         # Symmetrical Sampling
         t = torch.cat([t, self.model.num_timesteps - 1 - t], dim=0)[:n]
-
-        _, y_0_hat_batch, KL_loss, z_sample = self.cond_pred_model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-
-        loss_vae = log_normal(batch_y, y_0_hat_batch, torch.from_numpy(np.array(1)))
+        y_0_hat_batch, KL_loss, z_sample = self.condition_model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates=batch_cov)
+        loss_vae = log_normal(batch_y[:, :, f_dim:], y_0_hat_batch[:, :, f_dim:], torch.from_numpy(np.array(1)))
         loss_vae_all = loss_vae + self.args.k_z * KL_loss
 
         y_T_mean = y_0_hat_batch
+        batch_y = batch_y[:, :, f_dim:]
+        y_0_hat_batch = y_0_hat_batch[:, :, f_dim:]
         e = torch.randn_like(batch_y).to(self.device)
         y_t_batch = q_sample(batch_y, y_T_mean, self.model.alphas_bar_sqrt, self.model.one_minus_alphas_bar_sqrt, t, noise=e)
         output = self.model(batch_x, batch_x_mark, batch_y, y_t_batch, y_0_hat_batch, t)
 
-        loss = (e[:, -self.args.pred_len:, :] - output[:, -self.args.pred_len:, :]).square().mean() + self.args.k_cond * loss_vae_all
+        loss = (e[:, -self.args.pred_len:, f_dim:] - output[:, -self.args.pred_len:, f_dim:]).square().mean() + self.args.k_cond * loss_vae_all
         self.log('train_loss', loss, prog_bar=True, on_step=True, on_epoch=True)
         return loss
 
-    def validation_step(self, batch, batch_idx):
-        if self.args.enable_covariates:
-            batch_x, batch_y, batch_x_mark, batch_y_mark = batch[0]
-            batch_cov = batch[1]
-        else:
-            batch_x, batch_y, batch_x_mark, batch_y_mark = batch
-            batch_cov = None
-        batch_x = batch_x.float().to(self.device)
-        batch_y = batch_y.float().to(self.device)
-        batch_x_mark = batch_x_mark.float().to(self.device)
-        batch_y_mark = batch_y_mark.float().to(self.device)
 
-        dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
-        dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
-        n = batch_x.size(0)
-        t = torch.randint(low=0, high=self.model.num_timesteps, size=(n // 2 + 1,)).to(self.device)
-        t = torch.cat([t, self.model.num_timesteps - 1 - t], dim=0)[:n]
-
-        _, y_0_hat_batch, KL_loss, z_sample = self.cond_pred_model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-
-        loss_vae = log_normal(batch_y, y_0_hat_batch, torch.from_numpy(np.array(1)))
-        loss_vae_all = loss_vae + self.args.k_z * KL_loss
-
-        y_T_mean = y_0_hat_batch
-        e = torch.randn_like(batch_y).to(self.device)
-        y_t_batch = q_sample(batch_y, y_T_mean, self.model.alphas_bar_sqrt, self.model.one_minus_alphas_bar_sqrt, t, noise=e)
-        output = self.model(batch_x, batch_x_mark, batch_y, y_t_batch, y_0_hat_batch, t)
-
-        loss = (e - output).square().mean() + self.args.k_cond * loss_vae_all
-        self.log('val_loss', loss)
-        return loss
-
-    def test_step(self, batch, batch_idx):
+    def sample_step(self, batch, batch_idx):
         if self.args.enable_covariates:
             batch_x, batch_y, batch_x_mark, batch_y_mark = batch[0]
             batch_cov = batch[1]
@@ -137,9 +129,9 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
             batch_cov = None
         dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
         dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float()
-
-        _, y_0_hat_batch, _, _ = self.cond_pred_model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-
+        f_dim = -1 if self.args.features == 'MS' else 0
+        y_0_hat_batch, KL_loss, z_sample = self.condition_model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates=batch_cov)
+        
         repeat_n = int(self.model.diffusion_config.testing.n_z_samples / self.model.diffusion_config.testing.n_z_samples_depart)
         y_0_hat_tile = y_0_hat_batch.repeat(repeat_n, 1, 1, 1)
         y_0_hat_tile = y_0_hat_tile.transpose(0, 1).flatten(0, 1)
@@ -161,15 +153,66 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
             gen_y_box.append(gen_y)
         
         outputs = np.concatenate(gen_y_box, axis=1)
-        f_dim = -1 if self.args.features == 'MS' else 0
+        f_dim = -1 if (self.args.features == 'MS') or (self.args.features == 'M') else 0
         outputs = outputs[:, :, -self.args.pred_len:, f_dim:]
         batch_y = batch_y[:, -self.args.pred_len:, f_dim:].cpu().numpy()
-
-        return {'pred': outputs, 'true': batch_y}
+        self.sample_outputs.append({'pred': outputs, 'true': batch_y})
+        # return {'pred': outputs, 'true': batch_y}
     
-    def test_epoch_end(self, outputs):
-        all_preds = np.concatenate([x['pred'] for x in outputs])
-        all_trues = np.concatenate([x['true'] for x in outputs])
+    def validation_step(self, batch, batch_idx):
+        if self.args.enable_covariates:
+            batch_x, batch_y, batch_x_mark, batch_y_mark = batch[0]
+            batch_cov = batch[1]
+        else:
+            batch_x, batch_y, batch_x_mark, batch_y_mark = batch
+            batch_cov = None
+        batch_x = batch_x.float().to(self.device)
+        batch_y = batch_y.float().to(self.device)
+        batch_x_mark = batch_x_mark.float().to(self.device)
+        batch_y_mark = batch_y_mark.float().to(self.device)
+
+        dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
+        dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
+
+        n = batch_x.size(0)
+        t = torch.randint(low=0, high=self.model.num_timesteps, size=(n // 2 + 1,)).to(self.device)
+        t = torch.cat([t, self.model.num_timesteps - 1 - t], dim=0)[:n]
+
+        y_0_hat_batch, KL_loss, z_sample = self.condition_model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates=batch_cov)
+        f_dim = -1 if self.args.features == 'MS' else 0
+        loss_vae = log_normal(batch_y[:, :, f_dim:], y_0_hat_batch[:, :, f_dim:], torch.from_numpy(np.array(1)))
+        loss_vae_all = loss_vae + self.args.k_z * KL_loss
+        batch_y = batch_y[:, :, f_dim:]
+        y_0_hat_batch = y_0_hat_batch[:, :, f_dim:]
+        y_T_mean = y_0_hat_batch
+        e = torch.randn_like(batch_y).to(self.device)
+        y_t_batch = q_sample(batch_y, y_T_mean, self.model.alphas_bar_sqrt, self.model.one_minus_alphas_bar_sqrt, t, noise=e)
+        output = self.model(batch_x, batch_x_mark, batch_y, y_t_batch, y_0_hat_batch, t)
+        loss = (e[:, -self.args.pred_len:, f_dim:] - output[:, -self.args.pred_len:, f_dim:]).square().mean() + self.args.k_cond * loss_vae_all
+        self.log('val_loss', loss)
+        self.sample_step(batch, batch_idx)
+        return loss
+    
+    def test_step(self, batch, batch_idx):
+        self.sample_step(batch, batch_idx)
+
+    def on_validation_epoch_end(self):
+        all_preds = np.concatenate([x['pred'] for x in self.sample_outputs])
+        all_trues = np.concatenate([x['true'] for x in self.sample_outputs])
+
+        # Compute metrics
+        preds_ns = all_preds.mean(axis=1)
+        preds_ns = preds_ns.reshape(-1, preds_ns.shape[-2], preds_ns.shape[-1])
+        trues_ns = all_trues.reshape(-1, all_trues.shape[-2], all_trues.shape[-1])
+
+        mae, mse, rmse, mape, mspe = metric(preds_ns, trues_ns)
+        self.log('val_mse', mse)
+        self.log('val_mae', mae)
+        self.sample_outputs = []
+
+    def on_test_epoch_end(self):
+        all_preds = np.concatenate([x['pred'] for x in self.sample_outputs])
+        all_trues = np.concatenate([x['true'] for x in self.sample_outputs])
 
         # Compute metrics
         preds_ns = all_preds.mean(axis=1)
@@ -179,6 +222,9 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         mae, mse, rmse, mape, mspe = metric(preds_ns, trues_ns)
         self.log('test_mse', mse)
         self.log('test_mae', mae)
+        # save the outputs
+        np.save(os.path.join(self.args.save, 'outputs.npy'), all_preds)
+
 
 
     def train_dataloader(self):
