@@ -282,9 +282,6 @@ class DatasetPerIndividual(Dataset):
         border1 = border1s[self.set_type]
         border2 = border2s[self.set_type]
 
-        if self.set_type == 0:
-            border2 = (border2 - self.seq_len) + self.seq_len
-
         if self.features == 'M' or self.features == 'MS':
             cols_data = df_raw.columns[1:]
             df_data = df_raw[cols_data]
@@ -328,7 +325,8 @@ class DatasetPerIndividual(Dataset):
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 
     def __len__(self):
-        return (len(self.data_x) - self.seq_len - self.pred_len) // self.stride + 1
+        length = (len(self.data_x) - self.seq_len - self.pred_len) // self.stride + 1 
+        return length if length > 0 else 0
 
     def inverse_transform(self, data):
         return self.scaler.inverse_transform(data)
@@ -385,7 +383,7 @@ class Dataset_Combined(Dataset):
         # Partition the individual IDs
             train_ids, val_ids, test_ids = self.__partition_individuals(train_percent, val_percent)
             self.ids = train_ids if flag == 'train' else val_ids if flag == 'val' else test_ids
-        elif partition == 'chronological':
+        elif partition == 'chronological' or partition == 'chronological-2':
             self.ids = pd.read_csv(os.path.join(self.root_path, self.data_path))['USUBJID'].unique()
         else:
             raise ValueError('Invalid partition type: {}'.format(partition))
@@ -442,8 +440,10 @@ class Dataset_Combined(Dataset):
             self.scaler = StandardScaler()
             to_be_scaled = df_raw[[self.target]] if self.features == 'S' else df_raw.iloc[:,2:]
             new_data = self.scaler.fit_transform(to_be_scaled)
-            # print the mean and std of the target column
-            print(f'Target column mean: {self.scaler.mean_[0]}, std: {self.scaler.scale_[0]}')
+            # print the mean and std of each column
+            print('Mean:', self.scaler.mean_)
+            print('Std:', self.scaler.scale_)
+            
             if self.features == 'S':
                 df_raw[self.target] = new_data
             else:
@@ -468,22 +468,37 @@ class Dataset_Combined(Dataset):
             # turn the time column into a datetime object
             df_per_indiv[self.time_column] = pd.to_datetime(df_per_indiv[self.time_column])
             time_diff = df_per_indiv[self.time_column].diff() > pd.Timedelta(self.gap_tolerance)
+            # TODO: if the time difference is greater than the gap tolerance, we combine the two sequences and interpolate the missing values
+
+
             groups = time_diff.cumsum()
             list_of_dfs = [group_df for _, group_df in df_per_indiv.groupby(groups)]
+
+            # Interpolate missing values within each group
+            # list_of_dfs = [group_df.set_index(self.time_column).resample('5T').asfreq().interpolate(method='time').reset_index() for group_df in list_of_dfs]
+            
             # filter out the groups that are too short
-            list_of_dfs = [group_df for group_df in list_of_dfs if len(group_df) > 2 * (self.seq_len + self.pred_len)]
+            list_of_dfs = [group_df for group_df in list_of_dfs if len(group_df) >  2 * (self.seq_len + self.pred_len)]
+
+            if self.partition == 'chronological-2':
+                    # train, val, test
+                    border1s = [0, len(list_of_dfs) * self.train_percent // 100, len(list_of_dfs) * (self.train_percent + self.val_percent) // 100]
+                    border2s = [len(list_of_dfs) * self.train_percent // 100, len(list_of_dfs) * (self.train_percent + self.val_percent) // 100, len(list_of_dfs)]
+                    list_of_dfs = list_of_dfs[border1s[self.set_type]:border2s[self.set_type]]
 
 
             # Create a dataset for each split DataFrame
             for df_split in list_of_dfs:
-                if self.partition == 'individual':
-                    self.datasets.append(DatasetPerIndividual(df_split, individual_id, 'train', self.size, self.stride, self.features, self.data_path,
+                if self.partition == 'individual' or self.partition == 'chronological-2':
+                    data_set = DatasetPerIndividual(df_split, individual_id, 'train', self.size, self.stride, self.features, self.data_path,
                                                             self.target, self.scale if self.normalization =='individual' else False, self.timeenc,
-                                                            self.freq, 100, 0, time_column=self.time_column, covariates = covariates, cov_index = idx))
+                                                            self.freq, 100, 0, time_column=self.time_column, covariates = covariates, cov_index = idx)
+                    self.datasets.append(data_set) if len(data_set) > 0 else None
                 elif self.partition == 'chronological':
-                    self.datasets.append(DatasetPerIndividual(df_split, individual_id, self.flag, self.size, self.stride, self.features, self.data_path,
+                    data_set = DatasetPerIndividual(df_split, individual_id, self.flag, self.size, self.stride, self.features, self.data_path,
                                                             self.target, self.scale if self.normalization =='individual' else False, self.timeenc,
-                                                            self.freq, self.train_percent, self.val_percent, time_column=self.time_column, covariates = covariates, cov_index = idx))
+                                                            self.freq, self.train_percent, self.val_percent, time_column=self.time_column, covariates = covariates, cov_index = idx)
+                    self.datasets.append(data_set) if len(data_set) > 0 else None
                 else:
                     raise ValueError('Invalid partition type: {}'.format(self.partition))
 

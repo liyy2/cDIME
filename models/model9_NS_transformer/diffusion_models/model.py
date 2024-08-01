@@ -27,7 +27,7 @@ class ConditionalGuidedModel(nn.Module):
         n_steps = config.diffusion.timesteps + 1
         self.cat_x = config.model.cat_x
         self.cat_y_pred = config.model.cat_y_pred
-        data_dim = 2 * MTS_args.enc_in 
+        data_dim = 2 * MTS_args.dec_in 
 
         self.lin1 = ConditionalLinear(data_dim, 128, n_steps)
         self.lin2 = ConditionalLinear(128, 128, n_steps)

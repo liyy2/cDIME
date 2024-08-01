@@ -2,7 +2,7 @@
 import torch
 from torch import nn, optim
 from torch.optim import lr_scheduler
-from models import Autoformer, DLinear, TimeLLM, DLinearChannelMix, DLinearMoE, TimeMixer, DLinearMoECov
+from models import Autoformer, DLinear, TimeLLM, DLinearChannelMix, DLinearMoE, TimeMixer, DLinearMoECov, Mamba, Koppa, PatchTST, LSTM
 import pytorch_lightning as pl
 
 
@@ -21,8 +21,18 @@ class TimeSeriesModel(pl.LightningModule):
             self.model = eval(args.model).Model(args).float()
         elif args.model.startswith('TimeMixer'):
             self.model = eval(args.model).Model(args).float()
-        else:
+        elif args.model.startswith('Mamba'):
+            self.model = eval(args.model).Model(args).float()
+        elif args.model.startswith('Koppa'):
+            self.model = eval(args.model).Model(args).float()
+        elif args.model.startswith('PatchTST'):
+            self.model = eval(args.model).Model(args).float()
+        elif args.model.startswith('LSTM'):
+            self.model = eval(args.model).Model(args).float()
+        elif args.model.startswith('TimeLLM'):
             self.model = TimeLLM.Model(args).float()
+        else:
+            raise ValueError(f"Model {args.model} not implemented")
         
         self.criterion = nn.MSELoss()
         self.mae_metric = nn.L1Loss()

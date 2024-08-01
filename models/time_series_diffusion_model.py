@@ -223,7 +223,7 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         self.log('test_mse', mse)
         self.log('test_mae', mae)
         # save the outputs
-        np.save(os.path.join(self.args.save, 'outputs.npy'), all_preds)
+        np.save(os.path.join(self.args.log_dir, 'outputs.npy'), all_preds)
 
 
 

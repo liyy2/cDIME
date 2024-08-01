@@ -3,7 +3,7 @@ import torch.nn as nn
 import numpy as np
 from math import sqrt
 from utils.masking import TriangularCausalMask, ProbMask
-from reformer_pytorch import LSHSelfAttention
+# from reformer_pytorch import LSHSelfAttention
 
 
 class DSAttention(nn.Module):

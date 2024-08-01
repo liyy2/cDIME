@@ -11,13 +11,11 @@ import torch_frame
 from torch_frame import TensorFrame, stype
 from torch_frame.data.stats import StatType
 from torch_frame.nn.conv import TabTransformerConv
-from layers.Embed import PatchEmbedding
 from torch_frame.nn.encoder import (
     EmbeddingEncoder,
     LinearEncoder,
     StypeWiseFeatureEncoder,
 )
-from torch_frame.nn import Trompt
 
 
 class ExampleTransformer(Module):
@@ -128,20 +126,11 @@ class Model(nn.Module):
         # time feature size
         self.expected_time_features = 4 if configs.freq.lower().endswith('h') else 5
 
-        # self.cov_encoder = ExampleTransformer(
-        #     channels=32,
-        #     out_channels=32,
-        #     num_layers=2,
-        #     num_heads=8,
-        #     col_stats=configs.col_stats,
-        #     col_names_dict=configs.col_names_dict,
-        # )
-
-        self.cov_encoder = Trompt(
+        self.cov_encoder = ExampleTransformer(
             channels=32,
             out_channels=32,
-            num_prompts=128,
-            num_layers=6,
+            num_layers=2,
+            num_heads=8,
             col_stats=configs.col_stats,
             col_names_dict=configs.col_names_dict,
         )
@@ -173,6 +162,7 @@ class Model(nn.Module):
         # x: [Batch, Input length, Channel]
         cov_embedding = self.cov_encoder(covariates)
         x_glucose = x_enc[:,:,-1].unsqueeze(-1)
+        x_glucose[:, 1:, :] = x_glucose[:, 1:, :] * 0
         x_wearable = x_enc[:,:,:-1]
         x_mark_initial = x_mark_enc[:,0] # Batch, MarkChannel
         # x_wearable_patch, nvars = self.patch_embed(x_wearable.permute(0,2,1).contiguous())
