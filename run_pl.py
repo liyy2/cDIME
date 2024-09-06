@@ -29,6 +29,8 @@ torch.backends.cudnn.benchmark = False
 
 
 # basic config
+parser.add_argument('--expand', type=int, default=2, help='expansion factor for Mamba')
+parser.add_argument('--d_conv', type=int, default=4, help='conv kernel size for Mamba')
 parser.add_argument('--num_nodes', type=int, default=1, help='number of nodes for gpu')
 parser.add_argument('--task_name', type=str, required=False, default='long_term_forecast',
                     help='task name, options:[long_term_forecast, short_term_forecast, imputation, classification, anomaly_detection]')
@@ -107,7 +109,7 @@ parser.add_argument('--use_deep_speed', type=int, default=1)
 parser.add_argument('--wandb', type=int, default=1, help='whether to use wandb')
 parser.add_argument('--wandb_group', type=str, default=None, help='wandb group')
 parser.add_argument('--wandb_api_key', type=str, default='6f1080f993d5d7ad6103e69ef57dd9291f1bf366')
-parser.add_argument('--num_experts', type=int, default=8)
+parser.add_argument('--num_experts', type=int, default=4)
 parser.add_argument('--head_dropout', type=float, default=0.1)
 
 # TimeMixer-specific parameters
