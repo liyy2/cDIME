@@ -42,7 +42,8 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         self.test_loader = test_loader
         self.model, self.cond_pred_model, self.cond_pred_model_train = self._build_model()
         self.sample_outputs = []
-        self.save_hyperparameters()
+        self.perturbed_outputs = []
+        # self.save_hyperparameters()
 
 
 
@@ -77,13 +78,19 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
             result = self.cond_pred_model(batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates=covariates)
         else:
             result = self.cond_pred_model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+        
         if isinstance(result, tuple):
-            y_0_hat_batch, KL_loss, z_sample = result[1:]
+            if len(result) >= 5:  # New format with covariate embeddings
+                y_0_hat_batch, KL_loss, z_sample, cov_embedding = result[1], result[2], result[3], result[4]
+            else:  # Old format
+                y_0_hat_batch, KL_loss, z_sample = result[1:]
+                cov_embedding = None
         else:
             y_0_hat_batch = result
             KL_loss = torch.tensor(0).to(self.device)
             z_sample = None
-        return y_0_hat_batch, KL_loss, z_sample
+            cov_embedding = None
+        return y_0_hat_batch, KL_loss, z_sample, cov_embedding
 
     def training_step(self, batch, batch_idx):
         if self.args.enable_covariates:
@@ -103,7 +110,7 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         t = torch.randint(low=0, high=self.model.num_timesteps, size=(n // 2 + 1,)).to(self.device)
         # Symmetrical Sampling
         t = torch.cat([t, self.model.num_timesteps - 1 - t], dim=0)[:n]
-        y_0_hat_batch, KL_loss, z_sample = self.condition_model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates=batch_cov)
+        y_0_hat_batch, KL_loss, z_sample, cov_embedding = self.condition_model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates=batch_cov)
         loss_vae = log_normal(batch_y[:, :, f_dim:], y_0_hat_batch[:, :, f_dim:], torch.from_numpy(np.array(1)))
         loss_vae_all = loss_vae + self.args.k_z * KL_loss
 
@@ -112,7 +119,8 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         y_0_hat_batch = y_0_hat_batch[:, :, f_dim:]
         e = torch.randn_like(batch_y).to(self.device)
         y_t_batch = q_sample(batch_y, y_T_mean, self.model.alphas_bar_sqrt, self.model.one_minus_alphas_bar_sqrt, t, noise=e)
-        output = self.model(batch_x, batch_x_mark, batch_y, y_t_batch, y_0_hat_batch, t)
+        # Pass covariate embedding to diffusion model for conditioning
+        output = self.model(batch_x, batch_x_mark, batch_y, y_t_batch, y_0_hat_batch, t, cov_embedding=cov_embedding)
 
         loss = (e[:, -self.args.pred_len:, f_dim:] - output[:, -self.args.pred_len:, f_dim:]).square().mean() + self.args.k_cond * loss_vae_all
         self.log('train_loss', loss, prog_bar=True, on_step=True, on_epoch=True)
@@ -130,7 +138,7 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
         dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float()
         f_dim = -1 if self.args.features == 'MS' else 0
-        y_0_hat_batch, KL_loss, z_sample = self.condition_model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates=batch_cov)
+        y_0_hat_batch, KL_loss, z_sample, cov_embedding = self.condition_model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates=batch_cov)
         
         repeat_n = int(self.model.diffusion_config.testing.n_z_samples / self.model.diffusion_config.testing.n_z_samples_depart)
         y_0_hat_tile = y_0_hat_batch.repeat(repeat_n, 1, 1, 1)
@@ -140,23 +148,33 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         x_tile = x_tile.transpose(0, 1).flatten(0, 1)
         x_mark_tile = batch_x_mark.repeat(repeat_n, 1, 1, 1)
         x_mark_tile = x_mark_tile.transpose(0, 1).flatten(0, 1)
+        
+        # Tile covariate embedding for multiple samples
+        cov_embedding_tile = None
+        if cov_embedding is not None:
+            cov_embedding_tile = cov_embedding.repeat(repeat_n, 1, 1)
+            cov_embedding_tile = cov_embedding_tile.transpose(0, 1).flatten(0, 1)
 
         gen_y_box = []
         for _ in range(self.model.diffusion_config.testing.n_z_samples_depart):
             y_tile_seq = p_sample_loop(self.model, x_tile, x_mark_tile, y_0_hat_tile, y_T_mean_tile,
                                        self.model.num_timesteps,
-                                       self.model.alphas, self.model.one_minus_alphas_bar_sqrt)
+                                       self.model.alphas, self.model.one_minus_alphas_bar_sqrt,
+                                       cov_embedding=cov_embedding_tile)
+            # Since we now only output glucose channels (1 channel), not c_out
+            glucose_channels = 1
             gen_y = y_tile_seq[-1].reshape(batch_x.shape[0],
                                            int(self.model.diffusion_config.testing.n_z_samples / self.model.diffusion_config.testing.n_z_samples_depart),
                                            (self.args.label_len + self.args.pred_len),
-                                           self.args.c_out).cpu().numpy()
+                                           glucose_channels).cpu().numpy()
             gen_y_box.append(gen_y)
         
         outputs = np.concatenate(gen_y_box, axis=1)
         f_dim = -1 if (self.args.features == 'MS') or (self.args.features == 'M') else 0
         outputs = outputs[:, :, -self.args.pred_len:, f_dim:]
         batch_y = batch_y[:, -self.args.pred_len:, f_dim:].cpu().numpy()
-        self.sample_outputs.append({'pred': outputs, 'true': batch_y})
+        self.sample_outputs.append({'pred': outputs, 'true': batch_y, 'batch_x': batch_x, 
+                    'batch_x_mark': batch_x_mark, 'batch_y_mark': batch_y_mark, 'batch_cov': batch_cov, 'batch': batch})
         # return {'pred': outputs, 'true': batch_y}
     
     def validation_step(self, batch, batch_idx):
@@ -178,7 +196,7 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         t = torch.randint(low=0, high=self.model.num_timesteps, size=(n // 2 + 1,)).to(self.device)
         t = torch.cat([t, self.model.num_timesteps - 1 - t], dim=0)[:n]
 
-        y_0_hat_batch, KL_loss, z_sample = self.condition_model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates=batch_cov)
+        y_0_hat_batch, KL_loss, z_sample, cov_embedding = self.condition_model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates=batch_cov)
         f_dim = -1 if self.args.features == 'MS' else 0
         loss_vae = log_normal(batch_y[:, :, f_dim:], y_0_hat_batch[:, :, f_dim:], torch.from_numpy(np.array(1)))
         loss_vae_all = loss_vae + self.args.k_z * KL_loss
@@ -187,7 +205,8 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         y_T_mean = y_0_hat_batch
         e = torch.randn_like(batch_y).to(self.device)
         y_t_batch = q_sample(batch_y, y_T_mean, self.model.alphas_bar_sqrt, self.model.one_minus_alphas_bar_sqrt, t, noise=e)
-        output = self.model(batch_x, batch_x_mark, batch_y, y_t_batch, y_0_hat_batch, t)
+        # Pass covariate embedding to diffusion model for conditioning 
+        output = self.model(batch_x, batch_x_mark, batch_y, y_t_batch, y_0_hat_batch, t, cov_embedding=cov_embedding)
         loss = (e[:, -self.args.pred_len:, f_dim:] - output[:, -self.args.pred_len:, f_dim:]).square().mean() + self.args.k_cond * loss_vae_all
         self.log('val_loss', loss)
         self.sample_step(batch, batch_idx)

@@ -5,19 +5,31 @@ import torch.nn.functional as F
 
 
 class ConditionalLinear(nn.Module):
-    def __init__(self, num_in, num_out, n_steps):
+    def __init__(self, num_in, num_out, n_steps, cov_dim=None):
         super(ConditionalLinear, self).__init__()
         self.num_out = num_out
         self.lin = nn.Linear(num_in, num_out)
         self.embed = nn.Embedding(n_steps, num_out)
         self.embed.weight.data.uniform_()
+        
+        # Add covariate conditioning support
+        self.use_cov_conditioning = cov_dim is not None
+        if self.use_cov_conditioning:
+            self.cov_projection = nn.Linear(cov_dim, num_out)
 
-    def forward(self, x, t):
+    def forward(self, x, t, cov_embedding=None):
         out = self.lin(x)
         gamma = self.embed(t)
-        # out = gamma.view(-1, self.num_out) * out
-
+        
+        # Apply time conditioning
         out = gamma.view(t.size()[0], -1, self.num_out) * out
+        
+        # Apply covariate conditioning if available
+        if self.use_cov_conditioning and cov_embedding is not None:
+            cov_gamma = self.cov_projection(cov_embedding)  # [batch, num_out]
+            cov_gamma = cov_gamma.unsqueeze(1)  # [batch, 1, num_out] for broadcasting
+            out = out * (1 + cov_gamma)  # Multiplicative conditioning
+            
         return out
 
 
@@ -27,18 +39,35 @@ class ConditionalGuidedModel(nn.Module):
         n_steps = config.diffusion.timesteps + 1
         self.cat_x = config.model.cat_x
         self.cat_y_pred = config.model.cat_y_pred
-        data_dim = 2 * MTS_args.dec_in 
+        
+        # Fix data_dim to match actual glucose-only channels
+        # Since we now only work with glucose channel (1 channel), the input will be:
+        # - y_t: [batch, pred_len, 1] (glucose only)
+        # - y_0_hat: [batch, pred_len, 1] (glucose only)
+        # So when concatenated: [batch, pred_len, 2]
+        glucose_channels = 1  # Only glucose channel
+        if self.cat_y_pred:
+            data_dim = 2 * glucose_channels  # y_t + y_0_hat
+        else:
+            data_dim = glucose_channels  # only y_t
+        
+        # Add covariate conditioning support
+        self.use_cov_conditioning = getattr(config.model, 'use_cov_conditioning', True)
+        self.cov_dim = getattr(MTS_args, 'd_model', 512)  # Dimension of covariate embeddings
 
-        self.lin1 = ConditionalLinear(data_dim, 128, n_steps)
-        self.lin2 = ConditionalLinear(128, 128, n_steps)
-        self.lin3 = ConditionalLinear(128, 128, n_steps)
-        self.lin4 = nn.Linear(128, MTS_args.c_out)
+        # Create ConditionalLinear layers with covariate conditioning
+        cov_dim = self.cov_dim if self.use_cov_conditioning else None
+        self.lin1 = ConditionalLinear(data_dim, 128, n_steps, cov_dim=cov_dim)
+        self.lin2 = ConditionalLinear(128, 128, n_steps, cov_dim=cov_dim)
+        self.lin3 = ConditionalLinear(128, 128, n_steps, cov_dim=cov_dim)
+        self.lin4 = nn.Linear(128, glucose_channels)  # Output glucose channels only
 
-    def forward(self, x, y_t, y_0_hat, t):
+    def forward(self, x, y_t, y_0_hat, t, cov_embedding=None):
         # x size (batch * timesteps) * seq_len * data_dim (x is condition)
-        # y_t size (batch * timesteps) * pred_len * c_out
-        # y_0_hat size (batch * timesteps) * pred_len * c_out
-        # eps_pred batch * pred_len * c_out
+        # y_t size (batch * timesteps) * pred_len * glucose_channels (glucose only)
+        # y_0_hat size (batch * timesteps) * pred_len * glucose_channels (glucose only)
+        # cov_embedding size (batch * timesteps) * cov_dim (covariate conditioning)
+        # eps_pred batch * pred_len * glucose_channels
         # timestep
         if self.cat_x:
             if self.cat_y_pred:
@@ -50,20 +79,22 @@ class ConditionalGuidedModel(nn.Module):
                 eps_pred = torch.cat((y_t, y_0_hat), dim=2)
             else:
                 eps_pred = y_t
+            
         if y_t.device.type == 'mps':
-            eps_pred = self.lin1(eps_pred, t)
+            eps_pred = self.lin1(eps_pred, t, cov_embedding=cov_embedding)
             eps_pred = F.softplus(eps_pred.cpu()).to(y_t.device)
 
-            eps_pred = self.lin2(eps_pred, t)
+            eps_pred = self.lin2(eps_pred, t, cov_embedding=cov_embedding)
             eps_pred = F.softplus(eps_pred.cpu()).to(y_t.device)
 
-            eps_pred = self.lin3(eps_pred, t)
+            eps_pred = self.lin3(eps_pred, t, cov_embedding=cov_embedding)
             eps_pred = F.softplus(eps_pred.cpu()).to(y_t.device)
 
         else:
-            eps_pred = F.softplus(self.lin1(eps_pred, t))
-            eps_pred = F.softplus(self.lin2(eps_pred, t))
-            eps_pred = F.softplus(self.lin3(eps_pred, t))
+            eps_pred = F.softplus(self.lin1(eps_pred, t, cov_embedding=cov_embedding))
+            eps_pred = F.softplus(self.lin2(eps_pred, t, cov_embedding=cov_embedding))
+            eps_pred = F.softplus(self.lin3(eps_pred, t, cov_embedding=cov_embedding))
+            
         eps_pred = self.lin4(eps_pred)
         return eps_pred
 

@@ -77,8 +77,9 @@ class Model(nn.Module):
 
         a = 0
 
-    def forward(self, x, x_mark, y, y_t, y_0_hat, t):
+    def forward(self, x, x_mark, y, y_t, y_0_hat, t, cov_embedding=None):
         enc_out = self.enc_embedding(x, x_mark)
-        dec_out = self.diffussion_model(enc_out, y_t, y_0_hat, t)
+        # Pass covariate embedding to diffusion model for conditioning
+        dec_out = self.diffussion_model(enc_out, y_t, y_0_hat, t, cov_embedding=cov_embedding)
 
         return dec_out
