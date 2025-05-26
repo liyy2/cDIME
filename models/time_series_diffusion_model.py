@@ -6,7 +6,7 @@ from torch.optim import lr_scheduler
 from models.model9_NS_transformer.ns_models import ns_Transformer
 from models.model9_NS_transformer.diffusion_models import diffuMTS
 from models.model9_NS_transformer.diffusion_models.diffusion_utils import *
-from models import DLinearMoECov
+from models.model9_NS_transformer.ns_models import ns_DLinear
 
 import numpy as np
 import torch
@@ -16,6 +16,7 @@ from torch import optim
 import os
 import time
 import CRPS.CRPS as pscore
+from timm.scheduler import CosineLRScheduler
 
 import warnings
 warnings.filterwarnings('ignore')
@@ -49,9 +50,9 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
 
     def _build_model(self):
         model = diffuMTS.Model(self.args).float()
-        if self.args.model == 'DLinearMoECov':
-            cond_pred_model = DLinearMoECov.Model(self.args).float()
-            cond_pred_model_train = DLinearMoECov.Model(self.args).float()
+        if self.args.model == 'ns_DLinear':
+            cond_pred_model = ns_DLinear.Model(self.args).float()
+            cond_pred_model_train = ns_DLinear.Model(self.args).float()
         elif self.args.model == 'ns_Transformer':
             cond_pred_model = ns_Transformer.Model(self.args).float()
             cond_pred_model_train = ns_Transformer.Model(self.args).float()
@@ -61,17 +62,29 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
 
 
     def configure_optimizers(self):
-        optimizer = optim.AdamW([{'params': self.model.parameters()}, {'params': self.cond_pred_model.parameters()}], 
+        optimizer = optim.AdamW([{'params': self.model.parameters()}, {'params': self.cond_pred_model.parameters()}],
                                 lr=self.args.learning_rate,  weight_decay=1e-4)
-        if self.args.lradj == 'COS':
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max= self.args.train_epochs, eta_min=1e-8)
-        else:
-            scheduler = lr_scheduler.OneCycleLR(optimizer=optimizer,
-                                                steps_per_epoch=len(self.train_dataloader()),
-                                                pct_start=self.args.pct_start,
-                                                epochs=self.args.train_epochs,
-                                                max_lr=self.args.learning_rate)
-        return [optimizer], [scheduler]
+        
+        # Using timm's CosineLRScheduler with warmup
+        scheduler = CosineLRScheduler(
+            optimizer,
+            t_initial=self.args.train_epochs,
+            lr_min=1e-8,  # Minimum learning rate
+            warmup_t=int(0.1 * self.args.train_epochs),  # 10% of total epochs for warmup
+            warmup_lr_init=self.args.learning_rate * 0.1,  # Initial LR for warmup
+            cycle_limit=1, # Number of cycles
+            t_in_epochs=True # Interpret t_initial and warmup_t as epochs
+        )
+        
+        return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]
+
+    def lr_scheduler_step(self, scheduler, metric):
+        # Custom step for timm scheduler
+        scheduler.step(epoch=self.current_epoch)
+
+    def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure):
+        # Standard optimizer step
+        optimizer.step(closure=optimizer_closure)
 
     def condition_model_forward(self, batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates=None):
         if self.args.enable_covariates:

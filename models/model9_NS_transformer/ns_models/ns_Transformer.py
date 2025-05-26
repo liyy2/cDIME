@@ -98,7 +98,8 @@ class Projector(nn.Module):
 
 def configure_moe(configs, use_moe=True, num_experts=4, expert_layers=2, 
                   moe_layer_indices=None, use_sparse_gating=False, top_k_experts=2, 
-                  moe_loss_weight=0.01, log_routing_stats=True):
+                  moe_loss_weight=0.01, log_routing_stats=True, num_universal_experts=1,
+                  universal_expert_weight=0.3):
     """
     Helper function to configure Mixture of Experts parameters
     
@@ -112,6 +113,8 @@ def configure_moe(configs, use_moe=True, num_experts=4, expert_layers=2,
         top_k_experts: Number of top experts to use when sparse gating is enabled (default: 2)
         moe_loss_weight: Weight for MoE loss in the combined KL loss (default: 0.01)
         log_routing_stats: Whether to log routing statistics to wandb (default: True)
+        num_universal_experts: Number of universal experts that are always used (default: 1)
+        universal_expert_weight: Weight given to universal experts (default: 0.3)
     """
     configs.use_moe = use_moe
     configs.num_experts = num_experts
@@ -121,6 +124,8 @@ def configure_moe(configs, use_moe=True, num_experts=4, expert_layers=2,
     configs.top_k_experts = top_k_experts
     configs.moe_loss_weight = moe_loss_weight
     configs.log_routing_stats = log_routing_stats
+    configs.num_universal_experts = num_universal_experts
+    configs.universal_expert_weight = universal_expert_weight
     
     return configs
 
@@ -212,6 +217,11 @@ class Model(nn.Module):
         self.moe_layer_indices = getattr(configs, 'moe_layer_indices', [1, 3])  # Which encoder layers to replace with MoE
         self.moe_loss_weight = getattr(configs, 'moe_loss_weight', 0.01)
         self.log_routing_stats = getattr(configs, 'log_routing_stats', True)
+        self.total_encoder_layers = configs.e_layers  # Store total number of encoder layers
+        
+        # Universal experts configuration
+        self.num_universal_experts = getattr(configs, 'num_universal_experts', 1)
+        self.universal_expert_weight = getattr(configs, 'universal_expert_weight', 0.3)
 
         # Time-series covariate configuration
         # Assume glucose is the last channel, rest are time-series covariates
@@ -257,7 +267,9 @@ class Model(nn.Module):
             
             # Create MoE layers
             self.moe_layers = nn.ModuleDict({
-                str(idx): MixtureOfExperts(configs, self.num_experts) 
+                str(idx): MixtureOfExperts(configs, self.num_experts, 
+                                         num_universal_experts=self.num_universal_experts,
+                                         universal_expert_weight=self.universal_expert_weight) 
                 for idx in self.moe_layer_indices
             })
             
@@ -415,7 +427,7 @@ class Model(nn.Module):
             regular_layer_idx = 0
             attns = []
             
-            for layer_idx in range(len(self.moe_layer_indices) + len(self.encoder_layers)):
+            for layer_idx in range(self.total_encoder_layers):
                 if layer_idx in self.moe_layer_indices:
                     # Use MoE layer
                     moe_layer = self.moe_layers[str(layer_idx)]
@@ -518,31 +530,97 @@ class Model(nn.Module):
             
             # Log statistics for each MoE layer
             for layer_name, routing_weights in routing_info.items():
-                # routing_weights: [batch_size, num_experts]
-                expert_usage = routing_weights.mean(dim=0).cpu().detach().numpy()
-                routing_entropy = self._compute_routing_entropy(routing_weights)
-                max_expert_weight = routing_weights.max(dim=1)[0].mean().item()
-                min_expert_weight = routing_weights.min(dim=1)[0].mean().item()
+                # Validate shape and fix if necessary
+                if routing_weights.dim() != 2:
+                    print(f"Warning: Unexpected routing weights shape for {layer_name}: {routing_weights.shape}")
+                    continue
+                    
+                # Ensure correct shape: [batch_size, num_experts]
+                if routing_weights.shape[1] != self.num_experts:
+                    # If shape is [num_experts, batch_size], transpose it
+                    if routing_weights.shape[0] == self.num_experts:
+                        routing_weights = routing_weights.transpose(0, 1)
+                        print(f"Fixed routing weights shape for {layer_name}: transposed to {routing_weights.shape}")
+                    else:
+                        print(f"Error: Cannot determine correct shape for {layer_name}: {routing_weights.shape}, expected [batch_size, {self.num_experts}]")
+                        continue
                 
-                # Log expert usage distribution
+                # routing_weights: [batch_size, num_experts]
+                expert_usage = routing_weights.mean(dim=0).cpu().detach().numpy()  # [num_experts]
+                
+                # Verify we have the correct number of experts
+                if len(expert_usage) != self.num_experts:
+                    print(f"Error: Expert usage has {len(expert_usage)} elements, expected {self.num_experts} for {layer_name}")
+                    continue
+                
+                # Separate universal and specialized expert statistics
+                if self.num_universal_experts > 0:
+                    universal_usage = expert_usage[:self.num_universal_experts]
+                    specialized_usage = expert_usage[self.num_universal_experts:] if self.num_universal_experts < self.num_experts else []
+                    
+                    # Log universal expert usage
+                    for i, usage in enumerate(universal_usage):
+                        wandb.log({f"moe/{layer_name}/universal_expert_{i}_usage": usage})
+                    
+                    # Log universal expert statistics
+                    wandb.log({
+                        f"moe/{layer_name}/universal_usage_mean": universal_usage.mean(),
+                        f"moe/{layer_name}/universal_usage_std": universal_usage.std(),
+                        f"moe/{layer_name}/num_universal_experts": len(universal_usage),
+                    })
+                    
+                    # Log specialized expert usage and statistics
+                    if len(specialized_usage) > 0:
+                        for i, usage in enumerate(specialized_usage):
+                            wandb.log({f"moe/{layer_name}/specialized_expert_{i}_usage": usage})
+                        
+                        # Compute specialized expert statistics
+                        specialized_routing_entropy = self._compute_routing_entropy(routing_weights[:, self.num_universal_experts:])
+                        specialized_weights = routing_weights[:, self.num_universal_experts:]
+                        
+                        wandb.log({
+                            f"moe/{layer_name}/specialized_routing_entropy": specialized_routing_entropy,
+                            f"moe/{layer_name}/specialized_usage_mean": specialized_usage.mean(),
+                            f"moe/{layer_name}/specialized_usage_std": specialized_usage.std(),
+                            f"moe/{layer_name}/specialized_max_weight": specialized_weights.max(dim=1)[0].mean().item(),
+                            f"moe/{layer_name}/specialized_min_weight": specialized_weights.min(dim=1)[0].mean().item(),
+                            f"moe/{layer_name}/num_specialized_experts": len(specialized_usage),
+                        })
+                        
+                        # Log specialized expert usage as histogram
+                        if hasattr(wandb, 'Histogram'):
+                            wandb.log({f"moe/{layer_name}/specialized_usage_hist": wandb.Histogram(specialized_usage)})
+                else:
+                    specialized_usage = expert_usage
+                
+                # Log all expert usage (universal + specialized)
                 for i, usage in enumerate(expert_usage):
                     wandb.log({f"moe/{layer_name}/expert_{i}_usage": usage})
                 
                 # Log overall statistics
+                routing_entropy = self._compute_routing_entropy(routing_weights)
+                max_expert_weight = routing_weights.max(dim=1)[0].mean().item()
+                min_expert_weight = routing_weights.min(dim=1)[0].mean().item()
+                
                 wandb.log({
-                    f"moe/{layer_name}/routing_entropy": routing_entropy,
-                    f"moe/{layer_name}/max_expert_weight": max_expert_weight,
-                    f"moe/{layer_name}/min_expert_weight": min_expert_weight,
-                    f"moe/{layer_name}/usage_std": expert_usage.std(),
-                    f"moe/{layer_name}/usage_mean": expert_usage.mean(),
+                    f"moe/{layer_name}/overall_routing_entropy": routing_entropy,
+                    f"moe/{layer_name}/overall_max_expert_weight": max_expert_weight,
+                    f"moe/{layer_name}/overall_min_expert_weight": min_expert_weight,
+                    f"moe/{layer_name}/overall_usage_std": expert_usage.std(),
+                    f"moe/{layer_name}/overall_usage_mean": expert_usage.mean(),
+                    f"moe/{layer_name}/total_experts": len(expert_usage),
+                    f"moe/{layer_name}/universal_weight_ratio": self.universal_expert_weight,
                 })
                 
-                # Log expert usage as histogram
+                # Log overall expert usage as histogram
                 if hasattr(wandb, 'Histogram'):
-                    wandb.log({f"moe/{layer_name}/expert_usage_hist": wandb.Histogram(expert_usage)})
+                    wandb.log({f"moe/{layer_name}/overall_usage_hist": wandb.Histogram(expert_usage)})
                     
         except Exception as e:
-            # Silently continue if logging fails
+            # Print error for debugging
+            print(f"Error in MoE logging: {e}")
+            print(f"Routing info shapes: {[(k, v.shape if hasattr(v, 'shape') else type(v)) for k, v in routing_info.items()]}")
+            # Continue silently to not interrupt training
             pass
 
 class ExpertNetwork(nn.Module):
@@ -584,33 +662,38 @@ class ExpertNetwork(nn.Module):
 class MixtureOfExperts(nn.Module):
     """
     Mixture of Experts layer that uses covariate embedding for routing
+    Supports universal experts that are always used plus specialized experts
     """
-    def __init__(self, configs, num_experts=4):
+    def __init__(self, configs, num_experts=4, num_universal_experts=1, universal_expert_weight=0.3):
         super(MixtureOfExperts, self).__init__()
         self.num_experts = num_experts
+        self.num_universal_experts = min(num_universal_experts, num_experts)  # Can't have more universal than total
+        self.num_specialized_experts = num_experts - self.num_universal_experts
+        self.universal_expert_weight = universal_expert_weight
         self.configs = configs
         
-        # Create expert networks
+        # Create expert networks (first num_universal_experts are universal, rest are specialized)
         self.experts = ModuleList([
             ExpertNetwork(configs, expert_id=i) for i in range(num_experts)
         ])
         
-        # Router network that uses covariate embedding
-        self.router = nn.Sequential(
-            nn.Linear(configs.d_model, configs.d_model // 2),
-            nn.ReLU(),
-            nn.Dropout(configs.dropout),
-            nn.Linear(configs.d_model // 2, num_experts),
-            nn.Softmax(dim=-1)
-        )
+        # Router network that uses covariate embedding (only routes to specialized experts)
+        if self.num_specialized_experts > 0:
+            self.specialized_router = nn.Sequential(
+                nn.Linear(configs.d_model, configs.d_model // 2),
+                nn.ReLU(),
+                nn.Dropout(configs.dropout),
+                nn.Linear(configs.d_model // 2, self.num_specialized_experts),
+                nn.Softmax(dim=-1)
+            )
         
-        # Gating mechanism for sparsity (optional)
+        # Gating mechanism for sparsity (optional, only for specialized experts)
         self.use_sparse_gating = getattr(configs, 'use_sparse_gating', False)
         self.top_k = getattr(configs, 'top_k_experts', 2)  # Use top-k experts
-        
+
     def forward(self, x, cov_embedding, attn_mask=None, tau=None, delta=None):
         """
-        Forward pass through mixture of experts
+        Forward pass through mixture of experts with universal and specialized experts
         
         Args:
             x: Input tensor [batch_size, seq_len, d_model]
@@ -621,50 +704,85 @@ class MixtureOfExperts(nn.Module):
         """
         batch_size, seq_len, d_model = x.shape
         
-        # Compute routing weights using covariate embedding
-        routing_weights = self.router(cov_embedding)  # [batch_size, num_experts]
+        # Initialize output
+        mixed_output = torch.zeros_like(x)
         
-        # Apply sparse gating if enabled
-        if self.use_sparse_gating:
-            # Keep only top-k experts
-            top_k_weights, top_k_indices = torch.topk(routing_weights, self.top_k, dim=-1)
-            # Renormalize
-            top_k_weights = F.softmax(top_k_weights, dim=-1)
-            # Create sparse weight matrix
-            sparse_weights = torch.zeros_like(routing_weights)
-            sparse_weights.scatter_(-1, top_k_indices, top_k_weights)
-            routing_weights = sparse_weights
+        # 1. Universal experts - always used with fixed weight
+        if self.num_universal_experts > 0:
+            universal_weight = self.universal_expert_weight / self.num_universal_experts
+            for i in range(self.num_universal_experts):
+                expert_out = self.experts[i](x, attn_mask=attn_mask, tau=tau, delta=delta)
+                mixed_output += universal_weight * expert_out
         
-        # Get outputs from all experts
-        expert_outputs = []
-        for i, expert in enumerate(self.experts):
-            expert_out = expert(x, attn_mask=attn_mask, tau=tau, delta=delta)
-            expert_outputs.append(expert_out)
+        # 2. Specialized experts - routed based on covariate embedding
+        routing_weights_for_logging = None
+        load_balancing_loss = 0.0
         
-        # Stack expert outputs: [num_experts, batch_size, seq_len, d_model]
-        expert_outputs = torch.stack(expert_outputs, dim=0)
+        if self.num_specialized_experts > 0:
+            # Compute routing weights for specialized experts only
+            specialized_routing_weights = self.specialized_router(cov_embedding)  # [batch_size, num_specialized_experts]
+            
+            # Apply sparse gating if enabled
+            if self.use_sparse_gating:
+                # Keep only top-k specialized experts
+                top_k_weights, top_k_indices = torch.topk(specialized_routing_weights, min(self.top_k, self.num_specialized_experts), dim=-1)
+                # Renormalize
+                top_k_weights = F.softmax(top_k_weights, dim=-1)
+                # Create sparse weight matrix
+                sparse_weights = torch.zeros_like(specialized_routing_weights)
+                sparse_weights.scatter_(-1, top_k_indices, top_k_weights)
+                specialized_routing_weights = sparse_weights
+            
+            # Adjust specialized weights to use remaining weight budget
+            remaining_weight = 1.0 - self.universal_expert_weight
+            specialized_routing_weights = specialized_routing_weights * remaining_weight
+            
+            # Store for logging
+            routing_weights_for_logging = specialized_routing_weights.clone()  # [batch_size, num_specialized_experts]
+            
+            # Get outputs from specialized experts and combine
+            for i, specialist_idx in enumerate(range(self.num_universal_experts, self.num_experts)):
+                expert_out = self.experts[specialist_idx](x, attn_mask=attn_mask, tau=tau, delta=delta)
+                # Apply routing weights: [batch_size, 1, 1] * [batch_size, seq_len, d_model]
+                weighted_output = specialized_routing_weights[:, i:i+1].unsqueeze(-1) * expert_out
+                mixed_output += weighted_output
+            
+            # Compute load balancing loss for specialized experts
+            load_balancing_loss = self._compute_load_balancing_loss(specialized_routing_weights.transpose(0, 1))
         
-        # Weighted combination of expert outputs
-        # routing_weights: [batch_size, num_experts] -> [num_experts, batch_size, 1, 1]
-        routing_weights = routing_weights.transpose(0, 1).unsqueeze(-1).unsqueeze(-1)
+        # Create combined routing weights for logging (universal + specialized)
+        if routing_weights_for_logging is not None:
+            # Create full routing weights including universal experts for logging
+            full_routing_weights = torch.zeros(batch_size, self.num_experts, device=x.device)
+            
+            # Universal experts get fixed weights
+            if self.num_universal_experts > 0:
+                universal_weight_per_expert = self.universal_expert_weight / self.num_universal_experts
+                full_routing_weights[:, :self.num_universal_experts] = universal_weight_per_expert
+            
+            # Specialized experts get routed weights
+            if self.num_specialized_experts > 0:
+                full_routing_weights[:, self.num_universal_experts:] = routing_weights_for_logging
+                
+            routing_weights_for_logging = full_routing_weights
+        else:
+            # Only universal experts
+            routing_weights_for_logging = torch.zeros(batch_size, self.num_experts, device=x.device)
+            if self.num_universal_experts > 0:
+                universal_weight_per_expert = self.universal_expert_weight / self.num_universal_experts
+                routing_weights_for_logging[:, :self.num_universal_experts] = universal_weight_per_expert
         
-        # Combine expert outputs
-        mixed_output = (expert_outputs * routing_weights).sum(dim=0)
-        
-        # Compute load balancing loss for training stability
-        load_balancing_loss = self._compute_load_balancing_loss(routing_weights.squeeze())
-        
-        return mixed_output, load_balancing_loss, routing_weights.squeeze()
+        return mixed_output, load_balancing_loss, routing_weights_for_logging
     
     def _compute_load_balancing_loss(self, routing_weights):
         """
         Compute load balancing loss to encourage uniform expert usage
         """
-        # routing_weights: [num_experts, batch_size]
+        # routing_weights: [num_specialized_experts, batch_size]
         expert_usage = routing_weights.mean(dim=1)  # Average usage per expert
         
         # Encourage uniform distribution across experts
-        uniform_target = torch.ones_like(expert_usage) / self.num_experts
+        uniform_target = torch.ones_like(expert_usage) / self.num_specialized_experts
         load_loss = F.mse_loss(expert_usage, uniform_target)
         
         return load_loss
