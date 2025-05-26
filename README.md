@@ -19,9 +19,6 @@
 - **Uncertainty Quantification**: Provides probabilistic forecasts with confidence intervals
 - **Multi-modal Conditioning**: Supports various types of covariates and auxiliary information
 
-<p align="center">
-<img src="./figures/method-detailed-illustration.png" height = "190" alt="" align=center />
-</p>
 
 ## Requirements
 
