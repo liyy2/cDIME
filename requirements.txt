@@ -13,4 +13,7 @@ pytorch-frame==0.2.5
 lightning=2.5.1
 CRPS
 wandb
+pytorch-lightning
+timm
+torchdiffeq
 
