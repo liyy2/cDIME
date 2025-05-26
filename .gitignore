@@ -5,3 +5,8 @@ wandb/
 *.out
 *.csv
 *.yaml
+*.pdf
+*.pth
+*.log
+*.png
+lightning_logs/*
