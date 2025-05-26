@@ -8,5 +8,4 @@ wandb/
 *.pdf
 *.pth
 *.log
-*.png
 lightning_logs/*

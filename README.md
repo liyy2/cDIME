@@ -4,11 +4,15 @@
   <h2><b> cDIME: Conditional Diffusion Mixture of Experts </b></h2>
   <h3><b> Probabilistic Time Series Forecasting via Conditional Diffusion and Flow Matching </b></h3>
 </div>
+<p align="center">
+<img src="./figures/architecture.png" height = "400" alt="cDIME Architecture" align=center />
+</p>
 
 
 ## Introduction
 
 **cDIME** (Conditional Diffusion Mixture of Experts) is a novel framework for probabilistic time series forecasting that leverages conditional diffusion models and flow matching techniques. The framework combines mixture of experts architectures with state-of-the-art generative modeling approaches to produce high-quality probabilistic forecasts with uncertainty quantification.
+
 
 
 ### Key Features
