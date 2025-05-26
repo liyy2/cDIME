@@ -240,6 +240,9 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         mae, mse, rmse, mape, mspe = metric(preds_ns, trues_ns)
         self.log('val_mse', mse)
         self.log('val_mae', mae)
+        self.log('val_rmse', rmse)
+        self.log('val_mape', mape)
+        self.log('val_mspe', mspe)
         self.sample_outputs = []
 
     def on_test_epoch_end(self):
@@ -254,6 +257,9 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         mae, mse, rmse, mape, mspe = metric(preds_ns, trues_ns)
         self.log('test_mse', mse)
         self.log('test_mae', mae)
+        self.log('test_rmse', rmse)
+        self.log('test_mape', mape)
+        self.log('test_mspe', mspe)
         # save the outputs
         np.save(os.path.join(self.args.log_dir, 'outputs.npy'), all_preds)
 

@@ -11,6 +11,7 @@ import torch_frame
 from torch_frame import TensorFrame, stype
 from torch_frame.data.stats import StatType
 from torch_frame.nn.conv import TabTransformerConv
+from torch_frame.nn import Trompt
 from torch_frame.nn.encoder import (
     EmbeddingEncoder,
     LinearEncoder,
@@ -406,13 +407,13 @@ class Model(nn.Module):
         self.expected_time_features = 4 if configs.freq.lower().endswith('h') else 5
 
         # Covariate encoder (time-invariant)
-        self.cov_encoder = ExampleTransformer(
-            channels=32,
-            out_channels=32,
-            num_layers=2,
-            num_heads=8,
-            col_stats=configs.col_stats,
-            col_names_dict=configs.col_names_dict,
+        self.cov_encoder = Trompt(
+                channels=32,
+                out_channels=32,
+                num_prompts=128,
+                num_layers=6,
+                col_stats=configs.col_stats,
+                col_names_dict=configs.col_names_dict,
         )
         
         # Wearable feature encoder (time-invariant from time series)
@@ -456,6 +457,12 @@ class Model(nn.Module):
             self.decoder = DLinearDecoder(self.latent_len, self.pred_len)
 
         # Final conditioning layer that combines covariate information
+        self.first_conditioning = nn.Sequential(
+            nn.Linear(self.expected_time_features + 192 + 32, 128),  # time + wearable + cov
+            nn.GELU(),
+            nn.LayerNorm(128),
+            nn.Linear(128, 32)
+        )
         self.final_conditioning = nn.Sequential(
             nn.Linear(self.expected_time_features + 32 + 32, 64),  # time + wearable + cov
             nn.ReLU(),
@@ -536,13 +543,14 @@ class Model(nn.Module):
         x_mark_initial = x_mark_enc[:, 0]  # [B, time_features]
         
         # Process covariates (time-invariant)
-        cov_embedding = self.cov_encoder(covariates)  # [B, 32]
-        
+        cov_embedding = self.cov_encoder(covariates)  # [B, 6, 32] # 6 is the number of layers in Trompt
+        cov_embedding = cov_embedding.reshape(cov_embedding.shape[0], -1) # [B, 192]
         # Process wearable features (time-invariant from time series)
         wearable_feature = self.wearable_encoder(
             x_wearable.reshape(-1, (self.channels - 1) * self.seq_len)
         )  # [B, 32]
-        
+        conditioning_features = torch.cat([x_mark_initial, wearable_feature, cov_embedding], dim=1)
+        cov_embedding = self.first_conditioning(conditioning_features) # [B, 32]
         # VAE Encoding: glucose time series -> latent time series
         encoded = self.encoder(x_glucose)  # [B, latent_len, 1]
         
@@ -570,7 +578,7 @@ class Model(nn.Module):
             decoded = self.decoder(z_sample)  # [B, pred_len, 1]
 
         # Final conditioning with time-invariant features
-        conditioning_features = torch.cat([x_mark_initial, wearable_feature, cov_embedding], dim=1)
+        conditioning_features = torch.cat([x_mark_initial, wearable_feature, cov_embedding], dim=1) # second conditing -> [B, 64]
         conditioning_adjustment = self.final_conditioning(conditioning_features)  # [B, pred_len]
         
         # Combine decoded output with conditioning
