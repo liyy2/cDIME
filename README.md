@@ -1,69 +1,30 @@
 <div align="center">
   <!-- <h1><b> Time-LLM </b></h1> -->
   <!-- <h2><b> Time-LLM </b></h2> -->
-  <h2><b> (ICLR'24) Time-LLM: Time Series Forecasting by Reprogramming Large Language Models </b></h2>
+  <h2><b> cDIME: Conditional Diffusion Mixture of Experts </b></h2>
+  <h3><b> Probabilistic Time Series Forecasting via Conditional Diffusion and Flow Matching </b></h3>
 </div>
 
-<div align="center">
-
-![](https://img.shields.io/github/last-commit/KimMeen/Time-LLM?color=green)
-![](https://img.shields.io/github/stars/KimMeen/Time-LLM?color=yellow)
-![](https://img.shields.io/github/forks/KimMeen/Time-LLM?color=lightblue)
-![](https://img.shields.io/badge/PRs-Welcome-green)
-
-</div>
-
-<div align="center">
-
-**[<a href="https://arxiv.org/abs/2310.01728">Paper Page</a>]**
-**[<a href="https://www.youtube.com/watch?v=L-hRexVa32k&t=160s">Paper Explained</a>]**
-**[<a href="https://mp.weixin.qq.com/s/FSxUdvPI713J2LiHnNaFCw">中文解读1</a>]**
-**[<a href="https://mp.weixin.qq.com/s/nUiQGnHOkWznoBPqM0KHXg">中文解读2</a>]**
-**[<a href="https://zhuanlan.zhihu.com/p/676256783">中文解读3</a>]**
-**[<a href="https://mp.weixin.qq.com/s/ZnR33epXCB7N5Y_kO0YJ_w">中文解读4</a>]**
-
-
-</div>
-
-<p align="center">
-
-<img src="./figures/logo.png" width="60">
-
-</p>
-
----
->
-> 🙋 Please let us know if you find out a mistake or have any suggestions!
-> 
-> 🌟 If you find this resource helpful, please consider to star this repository and cite our research:
-
-```
-@inproceedings{jin2023time,
-  title={{Time-LLM}: Time series forecasting by reprogramming large language models},
-  author={Jin, Ming and Wang, Shiyu and Ma, Lintao and Chu, Zhixuan and Zhang, James Y and Shi, Xiaoming and Chen, Pin-Yu and Liang, Yuxuan and Li, Yuan-Fang and Pan, Shirui and Wen, Qingsong},
-  booktitle={International Conference on Learning Representations (ICLR)},
-  year={2024}
-}
-```
-
-## Updates
-🚩 **News** (March 2024): Time-LLM has been upgraded to serve as a general framework for repurposing a wide range of language models to time series forecasting. It now defaults to supporting Llama-7B and includes compatibility with two additional smaller PLMs (GPT-2 and BERT). Simply adjust `--llm_model` and `--llm_dim` to switch backbones.
 
 ## Introduction
-Time-LLM is a reprogramming framework to repurpose LLMs for general time series forecasting with the backbone language models kept intact.
-Notably, we show that time series analysis (e.g., forecasting) can be cast as yet another "language task" that can be effectively tackled by an off-the-shelf LLM.
 
-<p align="center">
-<img src="./figures/framework.png" height = "360" alt="" align=center />
-</p>
+**cDIME** (Conditional Diffusion Mixture of Experts) is a novel framework for probabilistic time series forecasting that leverages conditional diffusion models and flow matching techniques. The framework combines mixture of experts architectures with state-of-the-art generative modeling approaches to produce high-quality probabilistic forecasts with uncertainty quantification.
 
-- Time-LLM comprises two key components: (1) reprogramming the input time series into text prototype representations that are more natural for the LLM, and (2) augmenting the input context with declarative prompts (e.g., domain expert knowledge and task instructions) to guide LLM reasoning.
+
+### Key Features
+
+- **Conditional Diffusion Models**: Employs diffusion processes conditioned on historical time series data and covariates
+- **Flow Matching**: Alternative generative modeling approach using continuous normalizing flows
+- **Mixture of Experts**: Leverages expert specialization for different time series patterns and domains
+- **Uncertainty Quantification**: Provides probabilistic forecasts with confidence intervals
+- **Multi-modal Conditioning**: Supports various types of covariates and auxiliary information
 
 <p align="center">
 <img src="./figures/method-detailed-illustration.png" height = "190" alt="" align=center />
 </p>
 
 ## Requirements
+
 - accelerate==0.20.3
 - einops==0.7.0
 - matplotlib==3.7.0
@@ -71,99 +32,169 @@ Notably, we show that time series analysis (e.g., forecasting) can be cast as ye
 - pandas==1.5.3
 - scikit_learn==1.2.2
 - scipy==1.5.4
-- torch==2.0.1
+- torch==2.7.0
 - tqdm==4.65.0
 - peft==0.4.0
 - transformers==4.31.0
+- pytorch-frame==0.2.5
+- lightning==2.5.1
+- CRPS
+- wandb
+- pytorch-lightning
+- timm
+- torchdiffeq
 
 To install all dependencies:
-```
+```bash
 pip install -r requirements.txt
 pip install deepspeed==0.13.0
 pip install sentencepiece
 ```
 
 ## Datasets
+
+The framework supports multiple time series datasets:
+
+### Standard Benchmarks
+- **ETT (Electricity Transforming Temperature)**: ETTh1, ETTh2, ETTm1, ETTm2
+- **Weather**: Weather forecasting dataset
+- **Electricity**: Electricity consuming load dataset
+- **Traffic**: Road occupancy rates dataset
+- **Exchange Rate**: Exchange rate dataset
+- **Solar**: Solar power production dataset
+- **PEMS**: Traffic flow dataset
+- **M4**: M4 competition dataset
+- **Illness**: Influenza-like illness dataset
+
+### Medical/Health Data
+- **Glucose**: Continuous glucose monitoring dataset for diabetes management
+
 You can access the well pre-processed datasets from [[Google Drive]](https://drive.google.com/file/d/1NF7VEefXCmXuWNbnNe858WvQAkJ_7wuP/view?usp=sharing), then place the downloaded contents under `./dataset`
 
-## Quick Demos
-1. Download datasets and place them under `./dataset`
-2. Tune the model. We provide five experiment scripts for demonstration purpose under the folder `./scripts`. For example, you can evaluate on ETT datasets by:
+## Quick Start
+
+### Training with Diffusion Models
+
+1. **Glucose Dataset (Diffusion)**:
+```bash
+bash ./scripts/train_glucose_diffusion_slurm.sh
+```
+
+2. **Standard Datasets**:
+```bash
+# For other datasets, modify the scripts accordingly
+bash ./scripts/glucose.sh
+```
+
+### Training with Flow Matching
+
+The framework also supports flow matching as an alternative to diffusion:
 
 ```bash
-bash ./scripts/TimeLLM_ETTh1.sh 
-```
-```bash
-bash ./scripts/TimeLLM_ETTh2.sh 
-```
-```bash
-bash ./scripts/TimeLLM_ETTm1.sh 
-```
-```bash
-bash ./scripts/TimeLLM_ETTm2.sh
+python run_pl_diffusion.py --model_type flow_matching --dataset glucose --enable_covariates
 ```
 
-## Detailed usage
+## Model Architecture
 
-Please refer to ```run_main.py```, ```run_m4.py``` and ```run_pretrain.py``` for the detailed description of each hyperparameter.
+### Diffusion Models
+- **Time Series Diffusion Model**: Conditional diffusion process for time series generation
+- **Noise Scheduling**: Advanced noise scheduling strategies
+- **Conditional Sampling**: Guided sampling with historical context
 
+### Flow Matching
+- **Continuous Normalizing Flows**: Alternative to discrete diffusion steps
+- **ODE-based Sampling**: Efficient sampling using ODE solvers
+- **Flow Matching Loss**: Direct optimization of probability paths
 
-## Further Reading
-1, [**Large Models for Time Series and Spatio-Temporal Data: A Survey and Outlook**](https://arxiv.org/abs/2310.10196), in *arXiv* 2023.
-[\[GitHub Repo\]](https://github.com/qingsongedu/Awesome-TimeSeries-SpatioTemporal-LM-LLM)
+### Mixture of Experts
+- **Expert Specialization**: Different experts for different time series patterns
+- **Covariate Conditioning**: Expert selection based on auxiliary information
+- **Dynamic Routing**: Adaptive expert selection during inference
 
-**Authors**: Ming Jin, Qingsong Wen*, Yuxuan Liang, Chaoli Zhang, Siqiao Xue, Xue Wang, James Zhang, Yi Wang, Haifeng Chen, Xiaoli Li (IEEE Fellow), Shirui Pan*, Vincent S. Tseng (IEEE Fellow), Yu Zheng (IEEE Fellow), Lei Chen (IEEE Fellow), Hui Xiong (IEEE Fellow)
+## Usage Examples
 
-
-```bibtex
-@article{jin2023lm4ts,
-  title={Large Models for Time Series and Spatio-Temporal Data: A Survey and Outlook}, 
-  author={Ming Jin and Qingsong Wen and Yuxuan Liang and Chaoli Zhang and Siqiao Xue and Xue Wang and James Zhang and Yi Wang and Haifeng Chen and Xiaoli Li and Shirui Pan and Vincent S. Tseng and Yu Zheng and Lei Chen and Hui Xiong},
-  journal={arXiv preprint arXiv:2310.10196},
-  year={2023}
-}
+### Basic Training
+```python
+# Diffusion model training
+python run_pl_diffusion.py \
+    --model ns_Transformer \
+    --data glucose \
+    --enable_covariates \
+    --pred_len 24 \
+    --seq_len 96
 ```
 
-2, [**Position Paper: What Can Large Language Models Tell Us about Time Series Analysis**](https://arxiv.org/abs/2402.02713), in *arXiv* 2024.
-
-**Authors**: Ming Jin, Yifan Zhang, Wei Chen, Kexin Zhang, Yuxuan Liang*, Bin Yang, Jindong Wang, Shirui Pan, Qingsong Wen*
-
-
-```bibtex
-@article{jin2024position,
-   title={Position Paper: What Can Large Language Models Tell Us about Time Series Analysis}, 
-   author={Ming Jin and Yifan Zhang and Wei Chen and Kexin Zhang and Yuxuan Liang and Bin Yang and Jindong Wang and Shirui Pan and Qingsong Wen},
-  journal={arXiv preprint arXiv:2402.02713},
-  year={2024}
-}
-```
-3, [**Transformers in Time Series: A Survey**](https://arxiv.org/abs/2202.07125), in IJCAI 2023.
-[\[GitHub Repo\]](https://github.com/qingsongedu/time-series-transformers-review)
-
-**Authors**: Qingsong Wen, Tian Zhou, Chaoli Zhang, Weiqi Chen, Ziqing Ma, Junchi Yan, Liang Sun
-
-```bibtex
-@inproceedings{wen2023transformers,
-  title={Transformers in time series: A survey},
-  author={Wen, Qingsong and Zhou, Tian and Zhang, Chaoli and Chen, Weiqi and Ma, Ziqing and Yan, Junchi and Sun, Liang},
-  booktitle={International Joint Conference on Artificial Intelligence(IJCAI)},
-  year={2023}
-}
+### Flow Matching Training
+```python
+# Flow matching model training
+python run_pl_diffusion.py \
+    --model_type flow_matching \
+    --model ns_Transformer \
+    --data glucose \
+    --enable_covariates \
+    --pred_len 24 \
+    --seq_len 96
 ```
 
-4, [**TimeMixer: Decomposable Multiscale Mixing for Time Series Forecasting**](https://openreview.net/pdf?id=7oLshfEIC2), in ICLR 2024.
-[\[GitHub Repo\]](https://github.com/kwuking/TimeMixer)
-
-**Authors**: Shiyu Wang, Haixu Wu, Xiaoming Shi, Tengge Hu, Huakun Luo, Lintao Ma, James Y. Zhang, Jun Zhou 
-
-```bibtex
-@inproceedings{wang2023timemixer,
-  title={TimeMixer: Decomposable Multiscale Mixing for Time Series Forecasting},
-  author={Wang, Shiyu and Wu, Haixu and Shi, Xiaoming and Hu, Tengge and Luo, Huakun and Ma, Lintao and Zhang, James Y and ZHOU, JUN},
-  booktitle={International Conference on Learning Representations (ICLR)},
-  year={2024}
-}
+### Evaluation
+```python
+# Model evaluation
+python eval_pl.py \
+    --checkpoint_path /path/to/checkpoint \
+    --data glucose \
+    --enable_covariates
 ```
+
+## Configuration
+
+Key hyperparameters can be configured:
+
+- `--model`: Backbone model (ns_Transformer, ns_DLinear)
+- `--model_type`: Generative model type (diffusion, flow_matching)
+- `--enable_covariates`: Enable covariate conditioning
+- `--pred_len`: Prediction horizon (number of future time steps to forecast)
+- `--label_len`: Label length (number of time steps from the end of input sequence used as initial context for decoder)
+- `--seq_len`: Input sequence length (historical time steps used as input)
+- `--learning_rate`: Learning rate
+- `--train_epochs`: Training epochs
+- `--k_cond`: Conditioning loss weight
+- `--k_z`: KL divergence weight
+
+### Sequence Configuration Details
+
+The framework uses a sliding window approach where:
+- **Input Sequence (`seq_len`)**: Historical observations used for encoding context
+- **Label Length (`label_len`)**: Overlap period between input and target sequences, providing initial context for the decoder
+- **Prediction Length (`pred_len`)**: Future time steps to be forecasted
+
+For example, with `seq_len=96`, `label_len=48`, and `pred_len=24`:
+- Model observes 96 historical time steps
+- Uses the last 48 time steps as decoder initialization context
+- Forecasts the next 24 time steps into the future
 
 ## Acknowledgement
-Our implementation adapts [Time-Series-Library](https://github.com/thuml/Time-Series-Library) and [OFA (GPT4TS)](https://github.com/DAMO-DI-ML/NeurIPS2023-One-Fits-All) as the code base and have extensively modified it to our purposes. We thank the authors for sharing their implementations and related resources.
+
+This implementation adapts and extends code from:
+- [Time-LLM](https://github.com/KimMeen/Time-LLM): Reprogramming framework for time series
+- [DiffusionMTS](https://github.com/diffusionMTS/diffusionMTS): Diffusion models for multivariate time series
+- [Time-Series-Library](https://github.com/thuml/Time-Series-Library): Comprehensive time series analysis library
+
+We thank the authors for sharing their implementations and related resources.
+
+## Citation
+
+If you use this code in your research, please cite:
+
+```bibtex
+@inproceedings{cdime2024,
+  title={cDIME: Conditional Diffusion Mixture of Experts for Time Series Forecasting},
+  author={[Authors]},
+  booktitle={[Conference]},
+  year={2024}
+}
+```
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
