@@ -22,7 +22,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:64"
 # Sweep configuration
 sweep_config = {
     'method': 'random',  # or 'grid', 'bayes'
-    'metric': {'name': 'val_loss', 'goal': 'minimize'},
+    'metric': {'name': 'val_mae', 'goal': 'minimize'},
     'parameters': {
         'learning_rate': {'values': [0.0001, 0.0004, 0.0005, 0.001, 0.01]},
         'batch_size': {'values': [16, 32, 64, 128]},
@@ -77,8 +77,8 @@ def train():
                         help='freq for time features encoding, '
                             'options:[s:secondly, t:minutely, h:hourly, d:daily, b:business days, w:weekly, m:monthly], '
                             'you can also use more detailed freq like 15min or 3h')
-    parser.add_argument('--checkpoints', type=str, default='/gpfs/gibbs/pi/gerstein/yl2428/checkpoints/', help='location of model checkpoints')
-    parser.add_argument('--log_dir', type=str, default='/gpfs/gibbs/pi/gerstein/yl2428/logs', help='location of log')
+    parser.add_argument('--checkpoints', type=str, default='/home/yl2428/checkpoints/', help='location of model checkpoints')
+    parser.add_argument('--log_dir', type=str, default='/home/yl2428/logs', help='location of log')
     # forecasting task
     parser.add_argument('--seq_len', type=int, default=96, help='input sequence length')
     parser.add_argument('--label_len', type=int, default=48, help='start token length')

@@ -408,8 +408,8 @@ class Model(nn.Module):
 
         # Covariate encoder (time-invariant)
         self.cov_encoder = Trompt(
-                channels=32,
-                out_channels=32,
+                channels=configs.d_model,
+                out_channels=configs.d_model,
                 num_prompts=128,
                 num_layers=6,
                 col_stats=configs.col_stats,
@@ -418,10 +418,10 @@ class Model(nn.Module):
         
         # Wearable feature encoder (time-invariant from time series)
         self.wearable_encoder = nn.Sequential(
-            nn.Linear((self.channels - 1) * self.seq_len, 32),
+            nn.Linear((self.channels - 1) * self.seq_len, configs.d_model),
             nn.ReLU(),
-            nn.LayerNorm(32),
-            nn.Linear(32, 32)
+            nn.LayerNorm(configs.d_model),
+            nn.Linear(configs.d_model, configs.d_model)
         )
 
         # VAE Encoder: DLinear that maps glucose time series to latent time series
@@ -446,8 +446,8 @@ class Model(nn.Module):
                 latent_len=self.latent_len,
                 pred_len=self.pred_len,
                 num_experts=self.num_experts,
-                cov_dim=32,
-                wearable_dim=32,
+                cov_dim=configs.d_model,
+                wearable_dim=configs.d_model,
                 num_universal_experts=self.num_universal_experts,
                 universal_expert_weight=self.universal_expert_weight,
                 dropout=getattr(configs, 'dropout', 0.1)
@@ -458,13 +458,13 @@ class Model(nn.Module):
 
         # Final conditioning layer that combines covariate information
         self.first_conditioning = nn.Sequential(
-            nn.Linear(self.expected_time_features + 192 + 32, 128),  # time + wearable + cov
+            nn.Linear(self.expected_time_features + 6 * configs.d_model + configs.d_model, 128),  # time + wearable + cov
             nn.GELU(),
             nn.LayerNorm(128),
-            nn.Linear(128, 32)
+            nn.Linear(128, configs.d_model)
         )
         self.final_conditioning = nn.Sequential(
-            nn.Linear(self.expected_time_features + 32 + 32, 64),  # time + wearable + cov
+            nn.Linear(self.expected_time_features + configs.d_model + configs.d_model, 64),  # time + wearable + cov
             nn.ReLU(),
             nn.Linear(64, self.pred_len)
         )
@@ -546,6 +546,7 @@ class Model(nn.Module):
         cov_embedding = self.cov_encoder(covariates)  # [B, 6, 32] # 6 is the number of layers in Trompt
         cov_embedding = cov_embedding.reshape(cov_embedding.shape[0], -1) # [B, 192]
         # Process wearable features (time-invariant from time series)
+        # add a convolution layer
         wearable_feature = self.wearable_encoder(
             x_wearable.reshape(-1, (self.channels - 1) * self.seq_len)
         )  # [B, 32]

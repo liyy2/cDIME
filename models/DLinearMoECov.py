@@ -110,7 +110,7 @@ class Model(nn.Module):
     """
     Decomposition-Linear
     """
-    def __init__(self, configs):
+    def __init__(self, configs, cov_encoder='TabTransformer'):
         super(Model, self).__init__()
         
         
@@ -136,15 +136,27 @@ class Model(nn.Module):
         #     col_stats=configs.col_stats,
         #     col_names_dict=configs.col_names_dict,
         # )
-
-        self.cov_encoder = Trompt(
-            channels=32,
-            out_channels=32,
-            num_prompts=128,
-            num_layers=6,
-            col_stats=configs.col_stats,
-            col_names_dict=configs.col_names_dict,
-        )
+        if cov_encoder == "Trompt":
+            self.cov_encoder = Trompt(
+                channels=32,
+                out_channels=32,
+                num_prompts=128,
+                num_layers=6,
+                col_stats=configs.col_stats,
+                col_names_dict=configs.col_names_dict,
+            )
+            self.linear_cov = nn.Linear(192, 32)
+        elif cov_encoder == "TabTransformer":
+            self.cov_encoder = ExampleTransformer(
+                channels=32,
+                out_channels=32,
+                num_layers=2,
+                num_heads=8,
+                col_stats=configs.col_stats,
+                col_names_dict=configs.col_names_dict,
+            )
+        else: 
+            raise ValueError(f"Invalid CovEncoder: {cov_encoder}")
         print(self.seq_len)
         print(self.pred_len * self.num_predictions)
         self.Linear_Seasonal = nn.Linear(self.seq_len, self.pred_len * self.num_predictions)
@@ -174,13 +186,14 @@ class Model(nn.Module):
         cov_embedding = self.cov_encoder(covariates)
         x_glucose = x_enc[:,:,-1].unsqueeze(-1)
         x_wearable = x_enc[:,:,:-1]
-        x_mark_initial = x_mark_enc[:,0] # Batch, MarkChannel
         # x_wearable_patch, nvars = self.patch_embed(x_wearable.permute(0,2,1).contiguous())
         # x_wearable_patch = x_wearable_patch.reshape(x_wearable_patch.shape[0] //nvars, nvars, x_wearable_patch.shape[1], -1)
 
         wearble_feature = self.Linear_wearable(x_wearable.reshape(-1, (self.channels - 1) * self.seq_len)) # Batch, 32
-        x_mark_initial = torch.cat([x_mark_initial, wearble_feature, cov_embedding], dim=1) # Batch, MarkChannel + 32
-
+        cov_embedding = cov_embedding.reshape(cov_embedding.shape[0], -1)
+        if self.cov_encoder == "Trompt":
+            cov_embedding = self.linear_cov(cov_embedding)
+        x_mark_initial = torch.cat([x_mark_enc[:,0], wearble_feature, cov_embedding], dim=1) # Batch, MarkChannel + 32
         seasonal_init, trend_init = self.decompsition(x_glucose)
         seasonal_init, trend_init = seasonal_init.permute(0,2,1), trend_init.permute(0,2,1)
         seasonal_output = self.Linear_Seasonal(seasonal_init)
