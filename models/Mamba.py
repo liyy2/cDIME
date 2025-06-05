@@ -4,7 +4,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from mamba_ssm import Mamba
+try:
+    from mamba_ssm import Mamba
+except ImportError:
+    print("Mamba not found, using dummy Mamba class")
+    class Mamba:
+        def __init__(self, *args, **kwargs):
+            pass
 
 from layers.Embed import DataEmbedding
 

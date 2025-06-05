@@ -4,8 +4,8 @@ from utils.tools import EarlyStopping
 from utils.metrics import metric
 from torch.optim import lr_scheduler
 from models.model9_NS_transformer.ns_models import ns_Transformer
-from models.model9_NS_transformer.diffusion_models import diffuMTS
-from models.model9_NS_transformer.diffusion_models.diffusion_utils import *
+from models.model9_NS_transformer.flow_matching_models import flowMTS
+from models.model9_NS_transformer.flow_matching_models.flow_matching_utils import *
 from models.model9_NS_transformer.ns_models import ns_DLinear
 
 import numpy as np
@@ -34,9 +34,9 @@ def log_normal(x, mu, var):
         var = var + eps
     return 0.5 * torch.mean(np.log(2.0 * np.pi) + torch.log(var) + torch.pow(x - mu, 2) / var)
 
-class TimeSeriesDiffusionModel(pl.LightningModule):
+class TimeSeriesFlowMatchingModel(pl.LightningModule):
     def __init__(self, args, train_loader=None, val_loader=None, test_loader=None):
-        super(TimeSeriesDiffusionModel, self).__init__()
+        super(TimeSeriesFlowMatchingModel, self).__init__()
         self.args = args
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -44,12 +44,9 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         self.model, self.cond_pred_model, self.cond_pred_model_train = self._build_model()
         self.sample_outputs = []
         self.perturbed_outputs = []
-        # self.save_hyperparameters()
-
-
 
     def _build_model(self):
-        model = diffuMTS.Model(self.args).float()
+        model = flowMTS.Model(self.args).float()
         if self.args.model == 'ns_DLinear':
             cond_pred_model = ns_DLinear.Model(self.args).float()
             cond_pred_model_train = ns_DLinear.Model(self.args).float()
@@ -59,7 +56,6 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         else:
             raise ValueError('Model not supported')
         return model, cond_pred_model, cond_pred_model_train
-
 
     def configure_optimizers(self):
         optimizer = optim.AdamW([{'params': self.model.parameters()}, {'params': self.cond_pred_model.parameters()}],
@@ -117,29 +113,32 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
         dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
-        # sample time steps of size batch_size
+        # sample time steps uniformly for flow matching
         f_dim = -1 if self.args.features == 'MS' else 0
         n = batch_x.size(0)
-        t = torch.randint(low=0, high=self.model.num_timesteps, size=(n // 2 + 1,)).to(self.device)
-        # Symmetrical Sampling
-        t = torch.cat([t, self.model.num_timesteps - 1 - t], dim=0)[:n]
-        y_0_hat_batch, KL_loss, z_sample, cov_embedding = self.condition_model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates=batch_cov)
+        
+        # Sample uniform time steps [0, 1] for flow matching
+        t = torch.rand(n).to(self.device)
+        
+        y_0_hat_batch, KL_loss, z_sample, cov_embedding = self.condition_model_forward(
+            batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates=batch_cov)
+        
         loss_vae = log_normal(batch_y[:, :, f_dim:], y_0_hat_batch[:, :, f_dim:], torch.from_numpy(np.array(1)))
         loss_vae_all = loss_vae + self.args.k_z * KL_loss
 
         y_T_mean = y_0_hat_batch
         batch_y = batch_y[:, :, f_dim:]
         y_0_hat_batch = y_0_hat_batch[:, :, f_dim:]
-        e = torch.randn_like(batch_y).to(self.device)
-        y_t_batch = q_sample(batch_y, y_T_mean, self.model.alphas_bar_sqrt, self.model.one_minus_alphas_bar_sqrt, t, noise=e)
-        # Pass covariate embedding to diffusion model for conditioning
-        output = self.model(batch_x, batch_x_mark, batch_y, y_t_batch, y_0_hat_batch, t, cov_embedding=cov_embedding)
-
-        loss = (e[:, -self.args.pred_len:, f_dim:] - output[:, -self.args.pred_len:, f_dim:]).square().mean() + self.args.k_cond * loss_vae_all
+        
+        # Flow matching loss computation
+        flow_loss = self.model.compute_loss(
+            batch_x, batch_x_mark, batch_y, y_0_hat_batch, t, 
+            cov_embedding=cov_embedding
+        )
+        
+        loss = flow_loss + self.args.k_cond * loss_vae_all
         self.log('train_loss', loss, prog_bar=True, on_step=True, on_epoch=True)
         return loss
-
-
 
     def sample_step(self, batch, batch_idx):
         if self.args.enable_covariates:
@@ -148,12 +147,15 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         else:
             batch_x, batch_y, batch_x_mark, batch_y_mark = batch
             batch_cov = None
+            
         dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
         dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float()
         f_dim = -1 if self.args.features == 'MS' else 0
-        y_0_hat_batch, KL_loss, z_sample, cov_embedding = self.condition_model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates=batch_cov)
         
-        repeat_n = int(self.model.diffusion_config.testing.n_z_samples / self.model.diffusion_config.testing.n_z_samples_depart)
+        y_0_hat_batch, KL_loss, z_sample, cov_embedding = self.condition_model_forward(
+            batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates=batch_cov)
+        
+        repeat_n = int(self.model.flow_config.testing.n_z_samples / self.model.flow_config.testing.n_z_samples_depart)
         y_0_hat_tile = y_0_hat_batch.repeat(repeat_n, 1, 1, 1)
         y_0_hat_tile = y_0_hat_tile.transpose(0, 1).flatten(0, 1)
         y_T_mean_tile = y_0_hat_tile
@@ -169,15 +171,18 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
             cov_embedding_tile = cov_embedding_tile.transpose(0, 1).flatten(0, 1)
 
         gen_y_box = []
-        for _ in range(self.model.diffusion_config.testing.n_z_samples_depart):
-            y_tile_seq = p_sample_loop(self.model, x_tile, x_mark_tile, y_0_hat_tile, y_T_mean_tile,
-                                       self.model.num_timesteps,
-                                       self.model.alphas, self.model.one_minus_alphas_bar_sqrt,
-                                       cov_embedding=cov_embedding_tile)
+        for _ in range(self.model.flow_config.testing.n_z_samples_depart):
+            # Use flow matching sampling with ODE solver
+            y_tile_seq = sample_flow_matching(
+                self.model, x_tile, x_mark_tile, y_0_hat_tile, y_T_mean_tile,
+                self.model.num_timesteps, solver='dopri5', 
+                cov_embedding=cov_embedding_tile
+            )
+            
             # Since we now only output glucose channels (1 channel), not c_out
             glucose_channels = 1
             gen_y = y_tile_seq[-1].reshape(batch_x.shape[0],
-                                           int(self.model.diffusion_config.testing.n_z_samples / self.model.diffusion_config.testing.n_z_samples_depart),
+                                           int(self.model.flow_config.testing.n_z_samples / self.model.flow_config.testing.n_z_samples_depart),
                                            (self.args.label_len + self.args.pred_len),
                                            glucose_channels).cpu().numpy()
             gen_y_box.append(gen_y)
@@ -188,7 +193,6 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         batch_y = batch_y[:, -self.args.pred_len:, f_dim:].cpu().numpy()
         self.sample_outputs.append({'pred': outputs, 'true': batch_y, 'batch_x': batch_x, 
                     'batch_x_mark': batch_x_mark, 'batch_y_mark': batch_y_mark, 'batch_cov': batch_cov, 'batch': batch})
-        # return {'pred': outputs, 'true': batch_y}
     
     def validation_step(self, batch, batch_idx):
         if self.args.enable_covariates:
@@ -197,6 +201,7 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         else:
             batch_x, batch_y, batch_x_mark, batch_y_mark = batch
             batch_cov = None
+            
         batch_x = batch_x.float().to(self.device)
         batch_y = batch_y.float().to(self.device)
         batch_x_mark = batch_x_mark.float().to(self.device)
@@ -206,21 +211,26 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
         n = batch_x.size(0)
-        t = torch.randint(low=0, high=self.model.num_timesteps, size=(n // 2 + 1,)).to(self.device)
-        t = torch.cat([t, self.model.num_timesteps - 1 - t], dim=0)[:n]
+        t = torch.rand(n).to(self.device)
 
-        y_0_hat_batch, KL_loss, z_sample, cov_embedding = self.condition_model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates=batch_cov)
+        y_0_hat_batch, KL_loss, z_sample, cov_embedding = self.condition_model_forward(
+            batch_x, batch_x_mark, dec_inp, batch_y_mark, covariates=batch_cov)
+        
         f_dim = -1 if self.args.features == 'MS' else 0
         loss_vae = log_normal(batch_y[:, :, f_dim:], y_0_hat_batch[:, :, f_dim:], torch.from_numpy(np.array(1)))
         loss_vae_all = loss_vae + self.args.k_z * KL_loss
+        
         batch_y = batch_y[:, :, f_dim:]
         y_0_hat_batch = y_0_hat_batch[:, :, f_dim:]
         y_T_mean = y_0_hat_batch
-        e = torch.randn_like(batch_y).to(self.device)
-        y_t_batch = q_sample(batch_y, y_T_mean, self.model.alphas_bar_sqrt, self.model.one_minus_alphas_bar_sqrt, t, noise=e)
-        # Pass covariate embedding to diffusion model for conditioning 
-        output = self.model(batch_x, batch_x_mark, batch_y, y_t_batch, y_0_hat_batch, t, cov_embedding=cov_embedding)
-        loss = (e[:, -self.args.pred_len:, f_dim:] - output[:, -self.args.pred_len:, f_dim:]).square().mean() + self.args.k_cond * loss_vae_all
+        
+        # Flow matching loss computation
+        flow_loss = self.model.compute_loss(
+            batch_x, batch_x_mark, batch_y, y_0_hat_batch, t, 
+            cov_embedding=cov_embedding
+        )
+        
+        loss = flow_loss + self.args.k_cond * loss_vae_all
         self.log('val_loss', loss)
         self.sample_step(batch, batch_idx)
         return loss
@@ -263,8 +273,6 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         # save the outputs
         np.save(os.path.join(self.args.log_dir, 'outputs.npy'), all_preds)
 
-
-
     def train_dataloader(self):
         return self.train_loader
 
@@ -272,5 +280,4 @@ class TimeSeriesDiffusionModel(pl.LightningModule):
         return self.val_loader
 
     def test_dataloader(self):
-        return self.test_loader
-    
+        return self.test_loader 

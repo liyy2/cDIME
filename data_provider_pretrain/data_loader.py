@@ -7,7 +7,7 @@ import warnings
 import numpy as np
 from sklearn.model_selection import train_test_split
 import torch_frame
-from torch_frame.data import Dataset
+from torch_frame.data import Dataset as TorchFrameDataset
 warnings.filterwarnings('ignore')
 import tqdm
 
@@ -230,7 +230,7 @@ class DatasetPerIndividual(Dataset):
     def __init__(self, df, individual_id, flag='train', size=None, stride=1,
                  features='S', data_path='ETTh1.csv',
                  target='OT', scale=True, timeenc=1, freq='t', train_percent=100, val_percent=0,
-                 seasonal_patterns=None, time_column='DateTime', covariates=None, cov_index=None):
+                 time_column='DateTime', covariates=None, cov_index=None):
         if size is None:
             self.seq_len = 24 * 4 * 4
             self.label_len = 24 * 4
@@ -336,7 +336,6 @@ class Dataset_Combined(Dataset):
                  features='S', data_path='Glucose.csv',
                  target='OT', scale=True, timeenc=1, freq='t', train_percent=70, val_percent = 20, 
                  partition = 'chronological', normalization = 'global',
-                 seasonal_patterns=None, 
                  gap_tolerance = '5 minute', 
                  time_column = 'DateTime', 
                  enable_covariates = False, 
@@ -407,7 +406,7 @@ class Dataset_Combined(Dataset):
             "DIABETES_ONSET": torch_frame.numerical,
         }
         # Set "target" as the target column.
-        dataset = Dataset(self.covariates, col_to_stype=col_to_stype)
+        dataset = TorchFrameDataset(self.covariates, col_to_stype=col_to_stype)
         dataset.materialize() # tensorize the data
         self.processed_covariates = dataset
 
@@ -445,63 +444,71 @@ class Dataset_Combined(Dataset):
             print('Std:', self.scaler.scale_)
             
             if self.features == 'S':
-                df_raw[self.target] = new_data
+                df_raw[self.target] = new_data.flatten()
             else:
                 df_raw.iloc[:, 2:] = new_data
         
-        if self.num_individuals >= 0: # -1 means all individuals
+        if self.num_individuals > 0: # -1 means all individuals
             self.ids = self.ids[:self.num_individuals]
 
         print('Loading data into memory...')
         for individual_id in tqdm.tqdm(self.ids):
-            df_per_indiv = df_raw[df_raw['USUBJID'] == individual_id]
-            covariates = self.covariates[self.covariates['USUBJID'] == individual_id] if self.enable_covariates else None
-            # turn covariates into a dictionary
-            covariates = covariates.to_dict(orient='records')[0] if covariates is not None else None
-            # get the exact index
-            idx = self.covariates[self.covariates['USUBJID'] == individual_id].index[0] if self.enable_covariates else None
-            cov_tensor_frame = self.processed_covariates[idx].tensor_frame if self.enable_covariates else None
-            # covarites prompt
-            if covariates is not None:
-                covariates['cov_str'] = f"This is an individual with type I diabetes. Here is the individual's basic information:\n" + str(covariates)
+            df_per_indiv = df_raw[df_raw['USUBJID'] == individual_id].copy() # Use .copy() to avoid SettingWithCopyWarning
+            self._create_datasets_for_individual(df_per_indiv, individual_id)
 
-            # turn the time column into a datetime object
-            df_per_indiv[self.time_column] = pd.to_datetime(df_per_indiv[self.time_column])
-            time_diff = df_per_indiv[self.time_column].diff() > pd.Timedelta(self.gap_tolerance)
-            # TODO: if the time difference is greater than the gap tolerance, we combine the two sequences and interpolate the missing values
+    def _create_datasets_for_individual(self, df_per_indiv, individual_id):
+        covariates = self.covariates[self.covariates['USUBJID'] == individual_id] if self.enable_covariates else None
+        covariates = covariates.to_dict(orient='records')[0] if covariates is not None else None
+        idx = self.covariates[self.covariates['USUBJID'] == individual_id].index[0] if self.enable_covariates else None
+        if covariates is not None:
+            covariates['cov_str'] = f"This is an individual with type I diabetes. Here is the individual's basic information:\n" + str(covariates)
 
+        df_per_indiv[self.time_column] = pd.to_datetime(df_per_indiv[self.time_column])
+        time_diff = df_per_indiv[self.time_column].diff() > pd.Timedelta(self.gap_tolerance)
 
-            groups = time_diff.cumsum()
-            list_of_dfs = [group_df for _, group_df in df_per_indiv.groupby(groups)]
+        groups = time_diff.cumsum()
+        list_of_dfs = [group_df for _, group_df in df_per_indiv.groupby(groups)]
 
-            # Interpolate missing values within each group
-            # list_of_dfs = [group_df.set_index(self.time_column).resample('5T').asfreq().interpolate(method='time').reset_index() for group_df in list_of_dfs]
-            
-            # filter out the groups that are too short
-            list_of_dfs = [group_df for group_df in list_of_dfs if len(group_df) >  2 * (self.seq_len + self.pred_len)]
+        # Interpolate missing values within each group
+        resampled_dfs = []
+        for group_df in list_of_dfs:
+            # Preserve USUBJID before resampling
+            usubjid_value = group_df['USUBJID'].iloc[0]
+            # Set time as index for resampling
+            group_resampled = group_df.set_index(self.time_column).resample('5T').asfreq()
+            # Interpolate missing values
+            group_resampled = group_resampled.interpolate(method='time')
+            # Reset index and restore USUBJID
+            group_resampled = group_resampled.reset_index()
+            group_resampled['USUBJID'] = usubjid_value
+            # Drop rows that are still NaN after interpolation (at the edges)
+            group_resampled = group_resampled.dropna()
+            resampled_dfs.append(group_resampled)
+        list_of_dfs = resampled_dfs
+        
+        # filter out the groups that are too short
+        list_of_dfs = [group_df for group_df in list_of_dfs if len(group_df) >= (self.seq_len + self.pred_len)]
 
-            if self.partition == 'chronological-2':
-                    # train, val, test
-                    border1s = [0, len(list_of_dfs) * self.train_percent // 100, len(list_of_dfs) * (self.train_percent + self.val_percent) // 100]
-                    border2s = [len(list_of_dfs) * self.train_percent // 100, len(list_of_dfs) * (self.train_percent + self.val_percent) // 100, len(list_of_dfs)]
-                    list_of_dfs = list_of_dfs[border1s[self.set_type]:border2s[self.set_type]]
+        if self.partition == 'chronological-2':
+            # train, val, test
+            border1s = [0, len(list_of_dfs) * self.train_percent // 100, len(list_of_dfs) * (self.train_percent + self.val_percent) // 100]
+            border2s = [len(list_of_dfs) * self.train_percent // 100, len(list_of_dfs) * (self.train_percent + self.val_percent) // 100, len(list_of_dfs)]
+            list_of_dfs = list_of_dfs[border1s[self.set_type]:border2s[self.set_type]]
 
-
-            # Create a dataset for each split DataFrame
-            for df_split in list_of_dfs:
-                if self.partition == 'individual' or self.partition == 'chronological-2':
-                    data_set = DatasetPerIndividual(df_split, individual_id, 'train', self.size, self.stride, self.features, self.data_path,
-                                                            self.target, self.scale if self.normalization =='individual' else False, self.timeenc,
-                                                            self.freq, 100, 0, time_column=self.time_column, covariates = covariates, cov_index = idx)
-                    self.datasets.append(data_set) if len(data_set) > 0 else None
-                elif self.partition == 'chronological':
-                    data_set = DatasetPerIndividual(df_split, individual_id, self.flag, self.size, self.stride, self.features, self.data_path,
-                                                            self.target, self.scale if self.normalization =='individual' else False, self.timeenc,
-                                                            self.freq, self.train_percent, self.val_percent, time_column=self.time_column, covariates = covariates, cov_index = idx)
-                    self.datasets.append(data_set) if len(data_set) > 0 else None
-                else:
-                    raise ValueError('Invalid partition type: {}'.format(self.partition))
-
+        # Create a dataset for each split DataFrame
+        for df_split in list_of_dfs:
+            if self.partition == 'individual' or self.partition == 'chronological-2':
+                data_set = DatasetPerIndividual(df_split, individual_id, 'train', self.size, self.stride, self.features, self.data_path,
+                                                        self.target, self.scale if self.normalization =='individual' else False, self.timeenc,
+                                                        self.freq, 100, 0, time_column=self.time_column, covariates = covariates, cov_index = idx)
+                self.datasets.append(data_set) if len(data_set) > 0 else None
+            elif self.partition == 'chronological':
+                data_set = DatasetPerIndividual(df_split, individual_id, self.flag, self.size, self.stride, self.features, self.data_path,
+                                                        self.target, self.scale if self.normalization =='individual' else False, self.timeenc,
+                                                        self.freq, self.train_percent, self.val_percent, time_column=self.time_column, covariates = covariates, cov_index = idx)
+                self.datasets.append(data_set) if len(data_set) > 0 else None
+            else:
+                raise ValueError('Invalid partition type: {}'.format(self.partition))
 
     def __len__(self):
         # sum the lengths of all datasets
@@ -511,7 +518,7 @@ class Dataset_Combined(Dataset):
         # cumsum the lengths of all datasets
         dataset_cumsum = np.cumsum([0] + [len(dataset) for dataset in self.datasets])
         # find the dataset index
-        dataset_idx = np.where(index >= dataset_cumsum)[0][-1]
+        dataset_idx = np.searchsorted(dataset_cumsum[1:], index, side='right')
         # find the index within the dataset
         dataset_index = index - dataset_cumsum[dataset_idx]
         if self.enable_covariates and self.cov_type == 'text':

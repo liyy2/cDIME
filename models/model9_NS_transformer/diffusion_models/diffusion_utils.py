@@ -54,13 +54,14 @@ def q_sample(y, y_0_hat, alphas_bar_sqrt, one_minus_alphas_bar_sqrt, t, noise=No
 
 
 # Reverse function -- sample y_{t-1} given y_t
-def p_sample(model, x, x_mark, y, y_0_hat, y_T_mean, t, alphas, one_minus_alphas_bar_sqrt):
+def p_sample(model, x, x_mark, y, y_0_hat, y_T_mean, t, alphas, one_minus_alphas_bar_sqrt, cov_embedding=None):
     """
     Reverse diffusion process sampling -- one time step.
 
     y: sampled y at time step t, y_t.
     y_0_hat: prediction of pre-trained guidance model.
     y_T_mean: mean of prior distribution at timestep T.
+    cov_embedding: covariate embedding for conditioning.
     We replace y_0_hat with y_T_mean in the forward process posterior mean computation, emphasizing that 
         guidance model prediction y_0_hat = f_phi(x) is part of the input to eps_theta network, while 
         in paper we also choose to set the prior mean at timestep T y_T_mean = f_phi(x).
@@ -78,7 +79,7 @@ def p_sample(model, x, x_mark, y, y_0_hat, y_T_mean, t, alphas, one_minus_alphas
     gamma_1 = (sqrt_one_minus_alpha_bar_t_m_1.square()) * (alpha_t.sqrt()) / (sqrt_one_minus_alpha_bar_t.square())
     gamma_2 = 1 + (sqrt_alpha_bar_t - 1) * (alpha_t.sqrt() + sqrt_alpha_bar_t_m_1) / (
         sqrt_one_minus_alpha_bar_t.square())
-    eps_theta = model(x, x_mark, 0, y, y_0_hat, t).to(device).detach()
+    eps_theta = model(x, x_mark, 0, y, y_0_hat, t, cov_embedding=cov_embedding).to(device).detach()
     # y_0 reparameterization
     y_0_reparam = 1 / sqrt_alpha_bar_t * (
             y - (1 - sqrt_alpha_bar_t) * y_T_mean - eps_theta * sqrt_one_minus_alpha_bar_t)
@@ -91,12 +92,12 @@ def p_sample(model, x, x_mark, y, y_0_hat, y_T_mean, t, alphas, one_minus_alphas
 
 
 # Reverse function -- sample y_0 given y_1
-def p_sample_t_1to0(model, x, x_mark, y, y_0_hat, y_T_mean, one_minus_alphas_bar_sqrt):
+def p_sample_t_1to0(model, x, x_mark, y, y_0_hat, y_T_mean, one_minus_alphas_bar_sqrt, cov_embedding=None):
     device = next(model.parameters()).device
     t = torch.tensor([0]).to(device)  # corresponding to timestep 1 (i.e., t=1 in diffusion models)
     sqrt_one_minus_alpha_bar_t = extract(one_minus_alphas_bar_sqrt, t, y)
     sqrt_alpha_bar_t = (1 - sqrt_one_minus_alpha_bar_t.square()).sqrt()
-    eps_theta = model(x, x_mark, 0, y, y_0_hat, t).to(device).detach()
+    eps_theta = model(x, x_mark, 0, y, y_0_hat, t, cov_embedding=cov_embedding).to(device).detach()
     # y_0 reparameterization
     y_0_reparam = 1 / sqrt_alpha_bar_t * (
             y - (1 - sqrt_alpha_bar_t) * y_T_mean - eps_theta * sqrt_one_minus_alpha_bar_t)
@@ -104,17 +105,17 @@ def p_sample_t_1to0(model, x, x_mark, y, y_0_hat, y_T_mean, one_minus_alphas_bar
     return y_t_m_1
 
 
-def p_sample_loop(model, x, x_mark, y_0_hat, y_T_mean, n_steps, alphas, one_minus_alphas_bar_sqrt):
+def p_sample_loop(model, x, x_mark, y_0_hat, y_T_mean, n_steps, alphas, one_minus_alphas_bar_sqrt, cov_embedding=None):
     device = next(model.parameters()).device
     z = torch.randn_like(y_T_mean).to(device)
     cur_y = z + y_T_mean  # sample y_T
     y_p_seq = [cur_y]
     for t in reversed(range(1, n_steps)):  # t from T to 2
         y_t = cur_y
-        cur_y = p_sample(model, x, x_mark, y_t, y_0_hat, y_T_mean, t, alphas, one_minus_alphas_bar_sqrt)  # y_{t-1}
+        cur_y = p_sample(model, x, x_mark, y_t, y_0_hat, y_T_mean, t, alphas, one_minus_alphas_bar_sqrt, cov_embedding=cov_embedding)  # y_{t-1}
         y_p_seq.append(cur_y)
     assert len(y_p_seq) == n_steps
-    y_0 = p_sample_t_1to0(model, x, x_mark, y_p_seq[-1], y_0_hat, y_T_mean, one_minus_alphas_bar_sqrt)
+    y_0 = p_sample_t_1to0(model, x, x_mark, y_p_seq[-1], y_0_hat, y_T_mean, one_minus_alphas_bar_sqrt, cov_embedding=cov_embedding)
     y_p_seq.append(y_0)
     return y_p_seq
 

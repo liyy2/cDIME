@@ -44,7 +44,7 @@ def data_provider(args, data, data_path, pretrain=True, flag='train'):
                             freq=args.freq,
                             features=args.features, 
                             enable_covariates=args.enable_covariates,
-                            num_individuals=args.num_individuals,)
+                            num_individuals=args.num_individuals, stride=args.stride)
 
     else:
         data_set = Data(

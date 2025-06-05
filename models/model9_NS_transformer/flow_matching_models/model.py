@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-  
 
 
 class ConditionalLinear(nn.Module):
@@ -33,10 +32,14 @@ class ConditionalLinear(nn.Module):
         return out
 
 
-class ConditionalGuidedModel(nn.Module):
+class ConditionalVelocityModel(nn.Module):
+    """
+    Flow matching model that predicts velocity field instead of noise.
+    Adapted from ConditionalGuidedModel for flow matching.
+    """
     def __init__(self, config, MTS_args):
-        super(ConditionalGuidedModel, self).__init__()
-        n_steps = config.diffusion.timesteps + 1
+        super(ConditionalVelocityModel, self).__init__()
+        n_steps = config.diffusion.timesteps + 1  # Reuse timesteps config
         self.cat_x = config.model.cat_x
         self.cat_y_pred = config.model.cat_y_pred
         
@@ -60,46 +63,59 @@ class ConditionalGuidedModel(nn.Module):
         self.lin1 = ConditionalLinear(data_dim, 128, n_steps, cov_dim=cov_dim)
         self.lin2 = ConditionalLinear(128, 128, n_steps, cov_dim=cov_dim)
         self.lin3 = ConditionalLinear(128, 128, n_steps, cov_dim=cov_dim)
-        self.lin4 = nn.Linear(128, glucose_channels)  # Output glucose channels only
+        self.lin4 = nn.Linear(128, glucose_channels)  # Output velocity for glucose channels only
 
     def forward(self, x, y_t, y_0_hat, t, cov_embedding=None):
+        """
+        Forward pass for velocity prediction
+        
+        Args:
+            x: Input conditions (encoder output)
+            y_t: Current state at time t
+            y_0_hat: Conditional prediction (guidance)
+            t: Time step
+            cov_embedding: Covariate embedding for conditioning
+            
+        Returns:
+            velocity: Predicted velocity field
+        """
         # x size (batch * timesteps) * seq_len * data_dim (x is condition)
         # y_t size (batch * timesteps) * pred_len * glucose_channels (glucose only)
         # y_0_hat size (batch * timesteps) * pred_len * glucose_channels (glucose only)
         # cov_embedding size (batch * timesteps) * cov_dim (covariate conditioning)
-        # eps_pred batch * pred_len * glucose_channels
-        # timestep
+        # velocity_pred batch * pred_len * glucose_channels
+        
         if self.cat_x:
             if self.cat_y_pred:
-                eps_pred = torch.cat((y_t, y_0_hat), dim=-1)
+                velocity_pred = torch.cat((y_t, y_0_hat), dim=-1)
             else:
-                eps_pred = torch.cat((y_t, x), dim=2)
+                velocity_pred = torch.cat((y_t, x), dim=2)
         else:
             if self.cat_y_pred:
-                eps_pred = torch.cat((y_t, y_0_hat), dim=2)
+                velocity_pred = torch.cat((y_t, y_0_hat), dim=2)
             else:
-                eps_pred = y_t
+                velocity_pred = y_t
             
-        if y_t.device.type == 'mps':
-            eps_pred = self.lin1(eps_pred, t, cov_embedding=cov_embedding)
-            eps_pred = F.softplus(eps_pred.cpu()).to(y_t.device)
+        if y_t.device.type == 'mps': # mps is for macos
+            velocity_pred = self.lin1(velocity_pred, t, cov_embedding=cov_embedding)
+            velocity_pred = F.softplus(velocity_pred.cpu()).to(y_t.device)
 
-            eps_pred = self.lin2(eps_pred, t, cov_embedding=cov_embedding)
-            eps_pred = F.softplus(eps_pred.cpu()).to(y_t.device)
+            velocity_pred = self.lin2(velocity_pred, t, cov_embedding=cov_embedding)
+            velocity_pred = F.softplus(velocity_pred.cpu()).to(y_t.device)
 
-            eps_pred = self.lin3(eps_pred, t, cov_embedding=cov_embedding)
-            eps_pred = F.softplus(eps_pred.cpu()).to(y_t.device)
+            velocity_pred = self.lin3(velocity_pred, t, cov_embedding=cov_embedding)
+            velocity_pred = F.softplus(velocity_pred.cpu()).to(y_t.device)
 
         else:
-            eps_pred = F.softplus(self.lin1(eps_pred, t, cov_embedding=cov_embedding))
-            eps_pred = F.softplus(self.lin2(eps_pred, t, cov_embedding=cov_embedding))
-            eps_pred = F.softplus(self.lin3(eps_pred, t, cov_embedding=cov_embedding))
+            velocity_pred = F.softplus(self.lin1(velocity_pred, t, cov_embedding=cov_embedding))
+            velocity_pred = F.softplus(self.lin2(velocity_pred, t, cov_embedding=cov_embedding))
+            velocity_pred = F.softplus(self.lin3(velocity_pred, t, cov_embedding=cov_embedding))
             
-        eps_pred = self.lin4(eps_pred)
-        return eps_pred
+        velocity_pred = self.lin4(velocity_pred)
+        return velocity_pred
 
 
-# deterministic feed forward neural network
+# deterministic feed forward neural network (same as diffusion)
 class DeterministicFeedForwardNeuralNetwork(nn.Module):
 
     def __init__(self, dim_in, dim_out, hid_layers,
@@ -130,7 +146,7 @@ class DeterministicFeedForwardNeuralNetwork(nn.Module):
         return self.network(x)
 
 
-# early stopping scheme for hyperparameter tuning
+# early stopping scheme for hyperparameter tuning (same as diffusion)
 class EarlyStopping:
     """Early stops the training if validation loss doesn't improve after a given patience."""
 
@@ -169,4 +185,4 @@ class EarlyStopping:
         else:
             self.best_score = score
             self.best_epoch = epoch + 1
-            self.counter = 0
+            self.counter = 0 

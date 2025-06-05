@@ -5,7 +5,6 @@ wandb/
 *.out
 *.csv
 *.yaml
-lightning_logs/
 *.pt
 *.pth
 *.log
@@ -30,4 +29,7 @@ lightning_logs/
 *.tsv
 *.xls
 *.xlsx
-*.png
+*.pdf
+*.pth
+*.log
+lightning_logs/*
