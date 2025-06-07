@@ -20,6 +20,7 @@ from torch_frame.nn.encoder import (
     LinearEncoder,
     StypeWiseFeatureEncoder,
 )
+from torch_frame.nn import Trompt
 
 try:
     import wandb
@@ -329,13 +330,14 @@ class Model(nn.Module):
             nn.ReLU(),
             nn.Linear(configs.d_model, configs.d_model)
         )
-        self.cov_encoder = ExampleTransformer(
-            channels=32,
-            out_channels=configs.d_model,
-            num_layers=4,
-            num_heads=8,
-            col_stats=configs.col_stats,
-            col_names_dict=configs.col_names_dict,
+        # Covariate encoder (time-invariant)
+        self.cov_encoder = Trompt(
+                channels=configs.d_model,
+                out_channels=configs.d_model,
+                num_prompts=128,
+                num_layers=6,
+                col_stats=configs.col_stats,
+                col_names_dict=configs.col_names_dict,
         )
         self.z_out = nn.Sequential(
             nn.Linear(configs.d_model, configs.d_model),
@@ -345,7 +347,7 @@ class Model(nn.Module):
         
         # Covariate fusion layer to combine tabular and time-series covariates
         self.covariate_fusion = nn.Sequential(
-            nn.Linear(configs.d_model * 2, configs.d_model),  # Combine tabular + time-series
+            nn.Linear(configs.d_model * 7, configs.d_model),  # Combine tabular + time-series
             nn.ReLU(),
             nn.Dropout(configs.dropout),
             nn.Linear(configs.d_model, configs.d_model)
@@ -383,7 +385,7 @@ class Model(nn.Module):
         
         # Process tabular covariates (time-invariant, no leakage concern)
         tabular_cov_embedding = self.cov_encoder(covariates)  # [B, d_model]
-        
+        tabular_cov_embedding = tabular_cov_embedding.reshape(tabular_cov_embedding.shape[0], -1) # [B, 192]
         # Process time-series covariates ONLY from historical encoder data (no future data)
         if self.ts_covariate_channels > 0 and x_ts_covariates is not None:
             # Use only historical time-series covariates from encoder to get time-invariant embedding

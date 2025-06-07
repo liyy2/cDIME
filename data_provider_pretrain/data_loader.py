@@ -383,7 +383,14 @@ class Dataset_Combined(Dataset):
             train_ids, val_ids, test_ids = self.__partition_individuals(train_percent, val_percent)
             self.ids = train_ids if flag == 'train' else val_ids if flag == 'val' else test_ids
         elif partition == 'chronological' or partition == 'chronological-2':
-            self.ids = pd.read_csv(os.path.join(self.root_path, self.data_path))['USUBJID'].unique()
+            data_file_path = os.path.join(self.root_path, self.data_path)
+            if data_file_path.endswith('.parquet'):
+                df_temp = pd.read_parquet(data_file_path)
+            elif data_file_path.endswith('.csv'):
+                df_temp = pd.read_csv(data_file_path)
+            else:
+                raise ValueError(f'Unsupported file format: {self.data_path}. Only CSV and Parquet files are supported.')
+            self.ids = df_temp['USUBJID'].unique()
         else:
             raise ValueError('Invalid partition type: {}'.format(partition))
         
@@ -412,7 +419,13 @@ class Dataset_Combined(Dataset):
 
 
     def __partition_individuals(self, train_percent, val_percent):
-        df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
+        data_file_path = os.path.join(self.root_path, self.data_path)
+        if data_file_path.endswith('.parquet'):
+            df_raw = pd.read_parquet(data_file_path)
+        elif data_file_path.endswith('.csv'):
+            df_raw = pd.read_csv(data_file_path)
+        else:
+            raise ValueError(f'Unsupported file format: {self.data_path}. Only CSV and Parquet files are supported.')
         individual_ids = df_raw['USUBJID'].unique()
         
         # Calculate validation and test set percentages
@@ -428,7 +441,13 @@ class Dataset_Combined(Dataset):
         return train_ids, val_ids, test_ids
     
     def __read_data__(self):
-        df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
+        data_file_path = os.path.join(self.root_path, self.data_path)
+        if data_file_path.endswith('.parquet'):
+            df_raw = pd.read_parquet(data_file_path)
+        elif data_file_path.endswith('.csv'):
+            df_raw = pd.read_csv(data_file_path)
+        else:
+            raise ValueError(f'Unsupported file format: {self.data_path}. Only CSV and Parquet files are supported.')
         # sanity checks
         assert 'USUBJID' in df_raw.columns, 'USUBJID column not found in the dataset'
         assert self.target in df_raw.columns, 'Target column not found in the dataset'
