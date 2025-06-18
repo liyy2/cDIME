@@ -227,7 +227,7 @@ class Model(nn.Module):
         # Time-series covariate configuration
         # Assume glucose is the last channel, rest are time-series covariates
         self.glucose_channels = 1  # Only glucose
-        self.ts_covariate_channels = configs.enc_in - self.glucose_channels  # All other channels
+        self.ts_covariate_channels = 1 if not configs.enable_context_aware else configs.enc_in  # All other channels
         
         # Embedding for glucose channel only
         self.enc_embedding = DataEmbedding(self.glucose_channels, configs.d_model, configs.embed, configs.freq,
@@ -378,7 +378,7 @@ class Model(nn.Module):
         # IMPORTANT: Only use encoder data for time-series covariates to prevent future data leakage
         # Separate glucose (last channel) from time-series covariates
         x_glucose = x_enc[:, :, -self.glucose_channels:]  # [B, seq_len, 1] - glucose channel (historical only)
-        x_ts_covariates = x_enc[:, :, :-self.glucose_channels] if self.ts_covariate_channels > 0 else None  # [B, seq_len, C-1] (historical only)
+        x_ts_covariates = x_enc[:, :, -self.glucose_channels:]  if self.ts_covariate_channels == 1 else x_enc[:, :, :] # [B, seq_len, C-1] (historical only)
         
         # For decoder, ONLY extract glucose from x_dec (no time-series covariates to prevent leakage)
         x_dec_glucose = x_dec[:, :, -self.glucose_channels:]  # [B, label_len + pred_len, 1]

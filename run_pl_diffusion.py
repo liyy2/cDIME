@@ -174,6 +174,7 @@ parser.add_argument('--ode_rtol', type=float, default=1e-5, help='Relative toler
 parser.add_argument('--ode_atol', type=float, default=1e-5, help='Absolute tolerance for ODE solver')
 parser.add_argument('--interpolation_type', type=str, default='linear', choices=['linear'],
                     help='Interpolation type for flow matching')
+parser.add_argument('--enable_context_aware', type=int, default=1, help='Use context aware flow matching')
 
 args = parser.parse_args()
 
