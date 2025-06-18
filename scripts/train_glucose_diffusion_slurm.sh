@@ -35,9 +35,9 @@ python run_pl_diffusion.py \
   --label_len 12 \
   --pred_len 32 \
   --factor 3 \
-  --enc_in 4 \
-  --dec_in 4 \
-  --c_out 4 \
+  --enc_in 9 \
+  --dec_in 9 \
+  --c_out 9 \
   --des 'Exp' \
   --itr 1 \
   --d_model $d_model \

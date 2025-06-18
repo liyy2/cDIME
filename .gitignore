@@ -33,3 +33,4 @@ wandb/
 *.pth
 *.log
 lightning_logs/*
+*.parquet
