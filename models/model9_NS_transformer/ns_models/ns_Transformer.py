@@ -20,6 +20,7 @@ from torch_frame.nn.encoder import (
     LinearEncoder,
     StypeWiseFeatureEncoder,
 )
+from torch_frame.nn import Trompt
 
 try:
     import wandb
@@ -226,7 +227,7 @@ class Model(nn.Module):
         # Time-series covariate configuration
         # Assume glucose is the last channel, rest are time-series covariates
         self.glucose_channels = 1  # Only glucose
-        self.ts_covariate_channels = configs.enc_in - self.glucose_channels  # All other channels
+        self.ts_covariate_channels = 1 if not configs.enable_context_aware else configs.enc_in  # All other channels
         
         # Embedding for glucose channel only
         self.enc_embedding = DataEmbedding(self.glucose_channels, configs.d_model, configs.embed, configs.freq,
@@ -329,13 +330,14 @@ class Model(nn.Module):
             nn.ReLU(),
             nn.Linear(configs.d_model, configs.d_model)
         )
-        self.cov_encoder = ExampleTransformer(
-            channels=32,
-            out_channels=configs.d_model,
-            num_layers=4,
-            num_heads=8,
-            col_stats=configs.col_stats,
-            col_names_dict=configs.col_names_dict,
+        # Covariate encoder (time-invariant)
+        self.cov_encoder = Trompt(
+                channels=configs.d_model,
+                out_channels=configs.d_model,
+                num_prompts=128,
+                num_layers=6,
+                col_stats=configs.col_stats,
+                col_names_dict=configs.col_names_dict,
         )
         self.z_out = nn.Sequential(
             nn.Linear(configs.d_model, configs.d_model),
@@ -345,7 +347,7 @@ class Model(nn.Module):
         
         # Covariate fusion layer to combine tabular and time-series covariates
         self.covariate_fusion = nn.Sequential(
-            nn.Linear(configs.d_model * 2, configs.d_model),  # Combine tabular + time-series
+            nn.Linear(configs.d_model * 7, configs.d_model),  # Combine tabular + time-series
             nn.ReLU(),
             nn.Dropout(configs.dropout),
             nn.Linear(configs.d_model, configs.d_model)
@@ -376,14 +378,14 @@ class Model(nn.Module):
         # IMPORTANT: Only use encoder data for time-series covariates to prevent future data leakage
         # Separate glucose (last channel) from time-series covariates
         x_glucose = x_enc[:, :, -self.glucose_channels:]  # [B, seq_len, 1] - glucose channel (historical only)
-        x_ts_covariates = x_enc[:, :, :-self.glucose_channels] if self.ts_covariate_channels > 0 else None  # [B, seq_len, C-1] (historical only)
+        x_ts_covariates = x_enc[:, :, -self.glucose_channels:]  if self.ts_covariate_channels == 1 else x_enc[:, :, :] # [B, seq_len, C-1] (historical only)
         
         # For decoder, ONLY extract glucose from x_dec (no time-series covariates to prevent leakage)
         x_dec_glucose = x_dec[:, :, -self.glucose_channels:]  # [B, label_len + pred_len, 1]
         
         # Process tabular covariates (time-invariant, no leakage concern)
         tabular_cov_embedding = self.cov_encoder(covariates)  # [B, d_model]
-        
+        tabular_cov_embedding = tabular_cov_embedding.reshape(tabular_cov_embedding.shape[0], -1) # [B, 192]
         # Process time-series covariates ONLY from historical encoder data (no future data)
         if self.ts_covariate_channels > 0 and x_ts_covariates is not None:
             # Use only historical time-series covariates from encoder to get time-invariant embedding
