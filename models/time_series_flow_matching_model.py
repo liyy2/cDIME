@@ -1,7 +1,7 @@
 import pytorch_lightning as pl
 from data_provider.data_factory import data_provider
 from utils.tools import EarlyStopping
-from utils.metrics import metric
+from utils.metrics import metric, comprehensive_metric
 from torch.optim import lr_scheduler
 from models.model9_NS_transformer.ns_models import ns_Transformer
 from models.model9_NS_transformer.flow_matching_models import flowMTS
@@ -112,7 +112,6 @@ class TimeSeriesFlowMatchingModel(pl.LightningModule):
         # tensor now contains the past 10 days of temperatures followed by 5 zero-initialized time steps.
         dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
         dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
-
         # sample time steps uniformly for flow matching
         f_dim = -1 if self.args.features == 'MS' else 0
         n = batch_x.size(0)
@@ -130,11 +129,23 @@ class TimeSeriesFlowMatchingModel(pl.LightningModule):
         batch_y = batch_y[:, :, f_dim:]
         y_0_hat_batch = y_0_hat_batch[:, :, f_dim:]
         
-        # Flow matching loss computation
-        flow_loss = self.model.compute_loss(
+        # Flow matching loss computation with MoE
+        moe_loss_weight = getattr(self.args, 'moe_loss_weight', 0.01)
+        flow_loss_result = self.model.compute_loss(
             batch_x, batch_x_mark, batch_y, y_0_hat_batch, t, 
-            cov_embedding=cov_embedding
+            cov_embedding=cov_embedding, moe_loss_weight=moe_loss_weight
         )
+        
+        # Handle different return formats
+        if isinstance(flow_loss_result, tuple):
+            # New format with MoE support
+            flow_loss, loss_dict = flow_loss_result
+            # Log individual loss components
+            self.log('train_flow_loss', loss_dict['flow_loss'], prog_bar=False, on_step=True, on_epoch=True)
+            self.log('train_load_balancing_loss', loss_dict['load_balancing_loss'], prog_bar=False, on_step=True, on_epoch=True)
+        else:
+            # Old format (backward compatibility)
+            flow_loss = flow_loss_result
         
         loss = flow_loss + self.args.k_cond * loss_vae_all
         self.log('train_loss', loss, prog_bar=True, on_step=True, on_epoch=True)
@@ -224,11 +235,23 @@ class TimeSeriesFlowMatchingModel(pl.LightningModule):
         y_0_hat_batch = y_0_hat_batch[:, :, f_dim:]
         y_T_mean = y_0_hat_batch
         
-        # Flow matching loss computation
-        flow_loss = self.model.compute_loss(
+        # Flow matching loss computation with MoE
+        moe_loss_weight = getattr(self.args, 'moe_loss_weight', 0.01)
+        flow_loss_result = self.model.compute_loss(
             batch_x, batch_x_mark, batch_y, y_0_hat_batch, t, 
-            cov_embedding=cov_embedding
+            cov_embedding=cov_embedding, moe_loss_weight=moe_loss_weight
         )
+        
+        # Handle different return formats
+        if isinstance(flow_loss_result, tuple):
+            # New format with MoE support
+            flow_loss, loss_dict = flow_loss_result
+            # Log individual loss components
+            self.log('val_flow_loss', loss_dict['flow_loss'])
+            self.log('val_load_balancing_loss', loss_dict['load_balancing_loss'])
+        else:
+            # Old format (backward compatibility)
+            flow_loss = flow_loss_result
         
         loss = flow_loss + self.args.k_cond * loss_vae_all
         self.log('val_loss', loss)
@@ -247,12 +270,9 @@ class TimeSeriesFlowMatchingModel(pl.LightningModule):
         preds_ns = preds_ns.reshape(-1, preds_ns.shape[-2], preds_ns.shape[-1])
         trues_ns = all_trues.reshape(-1, all_trues.shape[-2], all_trues.shape[-1])
 
-        mae, mse, rmse, mape, mspe = metric(preds_ns, trues_ns)
-        self.log('val_mse', mse)
-        self.log('val_mae', mae)
-        self.log('val_rmse', rmse)
-        self.log('val_mape', mape)
-        self.log('val_mspe', mspe)
+        comprehensive_metrics = comprehensive_metric(preds_ns, trues_ns)
+        for key, value in comprehensive_metrics.items():
+            self.log(f'val_{key}', value)
         self.sample_outputs = []
 
     def on_test_epoch_end(self):
@@ -264,12 +284,9 @@ class TimeSeriesFlowMatchingModel(pl.LightningModule):
         preds_ns = preds_ns.reshape(-1, preds_ns.shape[-2], preds_ns.shape[-1])
         trues_ns = all_trues.reshape(-1, all_trues.shape[-2], all_trues.shape[-1])
 
-        mae, mse, rmse, mape, mspe = metric(preds_ns, trues_ns)
-        self.log('test_mse', mse)
-        self.log('test_mae', mae)
-        self.log('test_rmse', rmse)
-        self.log('test_mape', mape)
-        self.log('test_mspe', mspe)
+        comprehensive_metrics = comprehensive_metric(preds_ns, trues_ns)
+        for key, value in comprehensive_metrics.items():
+            self.log(f'test_{key}', value)
         # save the outputs
         np.save(os.path.join(self.args.log_dir, 'outputs.npy'), all_preds)
 
