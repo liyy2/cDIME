@@ -265,28 +265,50 @@ class TimeSeriesFlowMatchingModel(pl.LightningModule):
         all_preds = np.concatenate([x['pred'] for x in self.sample_outputs])
         all_trues = np.concatenate([x['true'] for x in self.sample_outputs])
 
-        # Compute metrics
-        preds_ns = all_preds.mean(axis=1)
-        preds_ns = preds_ns.reshape(-1, preds_ns.shape[-2], preds_ns.shape[-1])
+        # Compute metrics for mean (original behavior)
+        preds_mean = all_preds.mean(axis=1)
+        preds_mean = preds_mean.reshape(-1, preds_mean.shape[-2], preds_mean.shape[-1])
         trues_ns = all_trues.reshape(-1, all_trues.shape[-2], all_trues.shape[-1])
 
-        comprehensive_metrics = comprehensive_metric(preds_ns, trues_ns)
-        for key, value in comprehensive_metrics.items():
-            self.log(f'val_{key}', value)
+        comprehensive_metrics_mean = comprehensive_metric(preds_mean, trues_ns)
+        for key, value in comprehensive_metrics_mean.items():
+            self.log(f'val_mean_{key}', value)
+
+        # Compute different percentiles 25%, 50%, 75% and use them to compute the metrics, log them separately
+        percentiles = [25, 50, 75]
+        for percentile in percentiles:
+            preds_percentile = np.percentile(all_preds, percentile, axis=1)
+            preds_percentile = preds_percentile.reshape(-1, preds_percentile.shape[-2], preds_percentile.shape[-1])
+            
+            comprehensive_metrics_percentile = comprehensive_metric(preds_percentile, trues_ns)
+            for key, value in comprehensive_metrics_percentile.items():
+                self.log(f'val_p{percentile}_{key}', value)
+
         self.sample_outputs = []
 
     def on_test_epoch_end(self):
         all_preds = np.concatenate([x['pred'] for x in self.sample_outputs])
         all_trues = np.concatenate([x['true'] for x in self.sample_outputs])
 
-        # Compute metrics
-        preds_ns = all_preds.mean(axis=1)
-        preds_ns = preds_ns.reshape(-1, preds_ns.shape[-2], preds_ns.shape[-1])
+        # Compute metrics for mean (original behavior)
+        preds_mean = all_preds.mean(axis=1)
+        preds_mean = preds_mean.reshape(-1, preds_mean.shape[-2], preds_mean.shape[-1])
         trues_ns = all_trues.reshape(-1, all_trues.shape[-2], all_trues.shape[-1])
 
-        comprehensive_metrics = comprehensive_metric(preds_ns, trues_ns)
-        for key, value in comprehensive_metrics.items():
-            self.log(f'test_{key}', value)
+        comprehensive_metrics_mean = comprehensive_metric(preds_mean, trues_ns)
+        for key, value in comprehensive_metrics_mean.items():
+            self.log(f'test_mean_{key}', value)
+
+        # Compute different percentiles 25%, 50%, 75% and use them to compute the metrics, log them separately
+        percentiles = [25, 50, 75]
+        for percentile in percentiles:
+            preds_percentile = np.percentile(all_preds, percentile, axis=1)
+            preds_percentile = preds_percentile.reshape(-1, preds_percentile.shape[-2], preds_percentile.shape[-1])
+            
+            comprehensive_metrics_percentile = comprehensive_metric(preds_percentile, trues_ns)
+            for key, value in comprehensive_metrics_percentile.items():
+                self.log(f'test_p{percentile}_{key}', value)
+
         # save the outputs
         np.save(os.path.join(self.args.log_dir, 'outputs.npy'), all_preds)
 
