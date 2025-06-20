@@ -68,12 +68,14 @@ class Model(nn.Module):
             
         Returns:
             velocity: Predicted velocity field
+            load_balancing_loss: Aggregated load balancing loss (0 if not using MoE)
+            routing_info: Routing information from MoE layers
         """
         enc_out = self.enc_embedding(x, x_mark)
-        # Predict velocity field instead of noise
-        velocity = self.flow_model(enc_out, y_t, y_0_hat, t, cov_embedding=cov_embedding)
+        # Predict velocity field and get MoE losses
+        velocity, load_balancing_loss, routing_info = self.flow_model(enc_out, y_t, y_0_hat, t, cov_embedding=cov_embedding)
 
-        return velocity
+        return velocity, load_balancing_loss, routing_info
     
     def sample(self, x, x_mark, y_0_hat, y_T_mean, num_timesteps=None, 
                solver='dopri5', rtol=1e-5, atol=1e-5, cov_embedding=None):
@@ -103,9 +105,9 @@ class Model(nn.Module):
         )
     
     def compute_loss(self, x, x_mark, y_0, y_0_hat, t, cov_embedding=None,
-                    noise_type="gaussian", interpolation_type="linear"):
+                    noise_type="gaussian", interpolation_type="linear", moe_loss_weight=0.01):
         """
-        Compute flow matching loss
+        Compute flow matching loss with optional MoE load balancing loss
         
         Args:
             x: Input conditions
@@ -116,11 +118,14 @@ class Model(nn.Module):
             cov_embedding: Covariate embedding for conditioning
             noise_type: Type of noise for y_1
             interpolation_type: Type of interpolation
+            moe_loss_weight: Weight for MoE load balancing loss
             
         Returns:
-            loss: Flow matching loss
+            total_loss: Flow matching loss + weighted load balancing loss
+            loss_dict: Dictionary containing individual loss components
         """
-        return flow_matching_loss(
+        return flow_matching_loss_with_moe(
             self, x, x_mark, y_0, y_0_hat, t, cov_embedding=cov_embedding,
-            noise_type=noise_type, interpolation_type=interpolation_type
+            noise_type=noise_type, interpolation_type=interpolation_type,
+            moe_loss_weight=moe_loss_weight
         ) 
