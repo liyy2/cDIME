@@ -275,7 +275,7 @@ class TimeSeriesFlowMatchingModel(pl.LightningModule):
             self.log(f'val_mean_{key}', value)
 
         # Compute different percentiles 25%, 50%, 75% and use them to compute the metrics, log them separately
-        percentiles = [25, 50, 75]
+        percentiles = [0, 25, 50, 75]
         for percentile in percentiles:
             preds_percentile = np.percentile(all_preds, percentile, axis=1)
             preds_percentile = preds_percentile.reshape(-1, preds_percentile.shape[-2], preds_percentile.shape[-1])
@@ -300,7 +300,7 @@ class TimeSeriesFlowMatchingModel(pl.LightningModule):
             self.log(f'test_mean_{key}', value)
 
         # Compute different percentiles 25%, 50%, 75% and use them to compute the metrics, log them separately
-        percentiles = [25, 50, 75]
+        percentiles = [0, 25, 50, 75]
         for percentile in percentiles:
             preds_percentile = np.percentile(all_preds, percentile, axis=1)
             preds_percentile = preds_percentile.reshape(-1, preds_percentile.shape[-2], preds_percentile.shape[-1])
