@@ -131,9 +131,35 @@ def configure_moe(configs, use_moe=True, num_experts=4, expert_layers=2,
     return configs
 
 
+def configure_contrastive_learning(configs, use_contrastive_learning=True, 
+                                   contrastive_loss_weight=0.1, contrastive_temperature=0.1,
+                                   use_momentum_encoder=True, momentum_factor=0.999,
+                                   augmentation_strength=0.1):
+    """
+    Helper function to configure contrastive learning parameters for context representation
+    
+    Args:
+        configs: Model configuration object
+        use_contrastive_learning: Whether to use InfoNCE contrastive learning (default: True)
+        contrastive_loss_weight: Weight for contrastive loss in combined loss (default: 0.1)
+        contrastive_temperature: Temperature parameter for InfoNCE loss (default: 0.1)
+        use_momentum_encoder: Whether to use momentum encoder for key generation (default: True)
+        momentum_factor: Momentum factor for exponential moving average (default: 0.999)
+        augmentation_strength: Strength of context augmentation (default: 0.1)
+    """
+    configs.use_contrastive_learning = use_contrastive_learning
+    configs.contrastive_loss_weight = contrastive_loss_weight
+    configs.contrastive_temperature = contrastive_temperature
+    configs.use_momentum_encoder = use_momentum_encoder
+    configs.momentum_factor = momentum_factor
+    configs.augmentation_strength = augmentation_strength
+    
+    return configs
+
+
 class TimeSeriesCovariateEncoder(nn.Module):
     """
-    1D CNN encoder for time-series covariates to get time-invariant embeddings
+    1D CNN encoder for time-series covariates to get both time-invariant and dynamic embeddings
     """
     def __init__(self, in_channels, d_model, seq_len, dropout=0.1):
         super(TimeSeriesCovariateEncoder, self).__init__()
@@ -162,8 +188,17 @@ class TimeSeriesCovariateEncoder(nn.Module):
         self.global_max_pool = nn.AdaptiveMaxPool1d(1)
         
         # Final projection to get time-invariant embedding
-        self.projection = nn.Sequential(
+        self.invariant_projection = nn.Sequential(
             nn.Linear(d_model * 2, d_model),  # *2 because we concatenate avg and max pool
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, d_model)
+        )
+        
+        # Projection for dynamic covariate tokens (temporal dimension preserved)
+        self.dynamic_projection = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.LayerNorm(d_model),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(d_model, d_model)
@@ -175,6 +210,7 @@ class TimeSeriesCovariateEncoder(nn.Module):
             x: Time-series covariates [batch_size, seq_len, in_channels]
         Returns:
             time_invariant_embedding: [batch_size, d_model]
+            dynamic_embedding: [batch_size, seq_len, d_model]
         """
         # Transpose for conv1d: [batch_size, in_channels, seq_len]
         x = x.transpose(1, 2)
@@ -189,15 +225,20 @@ class TimeSeriesCovariateEncoder(nn.Module):
                 x = x + residual
             x = self.dropout(x)
         
-        # Global pooling to get time-invariant features
+        # x is now [batch_size, d_model, seq_len]
+        
+        # 1. Time-invariant representation via global pooling
         avg_pool = self.global_avg_pool(x).squeeze(-1)  # [batch_size, d_model]
         max_pool = self.global_max_pool(x).squeeze(-1)  # [batch_size, d_model]
-        
-        # Concatenate and project
         pooled = torch.cat([avg_pool, max_pool], dim=1)  # [batch_size, d_model * 2]
-        time_invariant_embedding = self.projection(pooled)  # [batch_size, d_model]
+        time_invariant_embedding = self.invariant_projection(pooled)  # [batch_size, d_model]
         
-        return time_invariant_embedding
+        # 2. Dynamic representation preserving temporal dimension
+        # Transpose back to [batch_size, seq_len, d_model]
+        dynamic_features = x.transpose(1, 2)  # [batch_size, seq_len, d_model]
+        dynamic_embedding = self.dynamic_projection(dynamic_features)  # [batch_size, seq_len, d_model]
+        
+        return time_invariant_embedding, dynamic_embedding
 
 
 class Model(nn.Module):
@@ -347,11 +388,69 @@ class Model(nn.Module):
         
         # Covariate fusion layer to combine tabular and time-series covariates
         self.covariate_fusion = nn.Sequential(
-            nn.Linear(configs.d_model * 7, configs.d_model),  # Combine tabular + time-series
+            nn.Linear(configs.d_model * 2, configs.d_model),  # Combine tabular + time-series
             nn.ReLU(),
             nn.Dropout(configs.dropout),
             nn.Linear(configs.d_model, configs.d_model)
         )
+
+        # STRONG covariate conditioning for encoder/decoder
+        self.enc_cov_scale_net = nn.Sequential(
+            nn.Linear(configs.d_model, configs.d_model // 2),
+            nn.ReLU(),
+            nn.Linear(configs.d_model // 2, configs.d_model),
+            nn.Sigmoid()  # Ensure positive scales
+        )
+        self.enc_cov_shift_net = nn.Sequential(
+            nn.Linear(configs.d_model, configs.d_model // 2),
+            nn.ReLU(),
+            nn.Linear(configs.d_model // 2, configs.d_model)
+        )
+        
+        self.dec_cov_scale_net = nn.Sequential(
+            nn.Linear(configs.d_model, configs.d_model // 2),
+            nn.ReLU(),
+            nn.Linear(configs.d_model // 2, configs.d_model),
+            nn.Sigmoid()  # Ensure positive scales
+        )
+        self.dec_cov_shift_net = nn.Sequential(
+            nn.Linear(configs.d_model, configs.d_model // 2),
+            nn.ReLU(),
+            nn.Linear(configs.d_model // 2, configs.d_model)
+        )
+        
+        # Cross-attention between sequence and covariates
+        self.enc_cov_attention = nn.MultiheadAttention(
+            embed_dim=configs.d_model,
+            num_heads=configs.n_heads,
+            dropout=configs.dropout,
+            batch_first=True
+        )
+        self.dec_cov_attention = nn.MultiheadAttention(
+            embed_dim=configs.d_model,
+            num_heads=configs.n_heads,
+            dropout=configs.dropout,
+            batch_first=True
+        )
+        
+        # Covariate importance learning
+        self.cov_importance = nn.Sequential(
+            nn.Linear(configs.d_model, configs.d_model),
+            nn.Tanh(),
+            nn.Linear(configs.d_model, configs.d_model),
+            nn.Sigmoid()
+        )
+        
+        # Contrastive context learning for enriching covariate representations
+        self.use_contrastive_learning = getattr(configs, 'use_contrastive_learning', True)
+        self.contrastive_loss_weight = getattr(configs, 'contrastive_loss_weight', 0.1)
+        if self.use_contrastive_learning:
+            self.contrastive_context_learner = ContrastiveContextLearning(
+                d_model=configs.d_model,
+                temperature=getattr(configs, 'contrastive_temperature', 0.1),
+                use_momentum=getattr(configs, 'use_momentum_encoder', True),
+                momentum=getattr(configs, 'momentum_factor', 0.999)
+            )
 
     def KL_loss_normal(self, posterior_mean, posterior_logvar):
         KL = -0.5 * torch.mean(1 - posterior_mean ** 2 + posterior_logvar -
@@ -388,15 +487,41 @@ class Model(nn.Module):
         tabular_cov_embedding = tabular_cov_embedding.reshape(tabular_cov_embedding.shape[0], -1) # [B, 192]
         # Process time-series covariates ONLY from historical encoder data (no future data)
         if self.ts_covariate_channels > 0 and x_ts_covariates is not None:
-            # Use only historical time-series covariates from encoder to get time-invariant embedding
-            ts_cov_embedding = self.ts_cov_encoder(x_ts_covariates)  # [B, d_model]
-            # Fuse tabular and time-series covariate embeddings
-            combined_cov_embedding = self.covariate_fusion(
-                torch.cat([tabular_cov_embedding, ts_cov_embedding], dim=1)
+            # Use only historical time-series covariates from encoder to get both representations
+            ts_cov_invariant, ts_cov_dynamic = self.ts_cov_encoder(x_ts_covariates)  # [B, d_model], [B, seq_len, d_model]
+            
+            # Fuse invariant tabular and time-series covariate embeddings
+            combined_invariant_cov = self.covariate_fusion(
+                torch.cat([tabular_cov_embedding, ts_cov_invariant], dim=1)
             )  # [B, d_model]
         else:
             # Use only tabular covariates if no time-series covariates
-            combined_cov_embedding = tabular_cov_embedding
+            combined_invariant_cov = tabular_cov_embedding  # [B, d_model]
+            ts_cov_dynamic = None  # No dynamic time-series covariates
+            
+        # Apply contrastive learning to enrich context representations
+        contrastive_loss = 0.0
+        original_combined_invariant_cov = combined_invariant_cov.clone()  # Store for logging
+        
+        if self.use_contrastive_learning and self.training:
+            contrastive_loss, enriched_invariant_cov = self.contrastive_context_learner(
+                combined_invariant_cov, 
+                augmentation_strength=getattr(self, 'augmentation_strength', 0.1)
+            )
+            # Use enriched representations for better conditioning
+            combined_invariant_cov = enriched_invariant_cov
+            
+            # Log detailed contrastive learning statistics
+            self._log_contrastive_learning_details(
+                contrastive_loss, original_combined_invariant_cov, enriched_invariant_cov
+            )
+        elif self.use_contrastive_learning:
+            # During inference, still apply the context encoder for consistency
+            with torch.no_grad():
+                _, enriched_invariant_cov = self.contrastive_context_learner(
+                    combined_invariant_cov, augmentation_strength=0.0
+                )
+                combined_invariant_cov = enriched_invariant_cov
             
         x_raw = x_glucose.clone().detach()  # Use only glucose for raw processing
 
@@ -407,7 +532,6 @@ class Model(nn.Module):
         x_glucose_norm = x_glucose_norm / std_enc
         
         # Create decoder input with normalized glucose only (NO time-series covariates)
-        # This ensures decoder only processes glucose and uses covariate embeddings as conditioning
         x_dec_new = torch.cat([x_glucose_norm[:, -self.label_len:, :], 
                               torch.zeros_like(x_dec_glucose[:, -self.pred_len:, :])],
                               dim=1).to(x_glucose.device).clone()
@@ -417,10 +541,44 @@ class Model(nn.Module):
 
         # Model Inference
         enc_out = self.enc_embedding(x_glucose_norm, x_mark_enc)
-        # Add covariate embeddings as conditioning (time-invariant conditioning for VAE)
-        enc_out = enc_out + combined_cov_embedding.unsqueeze(1)
         
-        # Encoder processing with MoE
+        # STRONG covariate conditioning for encoder with proper cross-attention
+        # Learn importance of invariant covariate features
+        cov_importance = self.cov_importance(combined_invariant_cov)  # [batch, d_model]
+        weighted_invariant_cov = combined_invariant_cov * cov_importance  # [batch, d_model]
+        
+        # Apply FiLM conditioning to encoder using invariant covariates
+        enc_cov_scale = self.enc_cov_scale_net(weighted_invariant_cov)  # [batch, d_model]
+        enc_cov_shift = self.enc_cov_shift_net(weighted_invariant_cov)  # [batch, d_model]
+        enc_cov_scale = enc_cov_scale.unsqueeze(1)  # [batch, 1, d_model]
+        enc_cov_shift = enc_cov_shift.unsqueeze(1)  # [batch, 1, d_model]
+        enc_out = enc_cov_scale * enc_out + enc_cov_shift
+        
+        # Create covariate tokens for cross-attention
+        # Static covariate token: [batch, d_model] -> [batch, 1, d_model]
+        static_cov_token = weighted_invariant_cov.unsqueeze(1)  # [batch, 1, d_model]
+        
+        # Combine static and dynamic covariate tokens
+        if ts_cov_dynamic is not None:
+            # Dynamic covariate tokens: [batch, seq_len, d_model]
+            # Concatenate along sequence dimension: [batch, 1 + seq_len, d_model]
+            covariate_tokens = torch.cat([static_cov_token, ts_cov_dynamic], dim=1)
+        else:
+            # Only static covariate token: [batch, 1, d_model]
+            covariate_tokens = static_cov_token
+        
+        # Cross-attention between encoder output and combined covariate tokens
+        enc_attended, enc_attn_weights = self.enc_cov_attention(
+            query=enc_out,           # [batch, seq_len, d_model]
+            key=covariate_tokens,    # [batch, 1 + seq_len, d_model] or [batch, 1, d_model]
+            value=covariate_tokens   # [batch, 1 + seq_len, d_model] or [batch, 1, d_model]
+        )
+        # Residual connection with learned gating
+        # enc_attn_weights: [batch, seq_len, 1 + seq_len] or [batch, seq_len, 1]
+        enc_gate = torch.sigmoid(torch.mean(enc_attn_weights, dim=-1, keepdim=True))  # [batch, seq_len, 1]
+        enc_out = enc_out + enc_gate * enc_attended
+        
+        # Encoder processing with MoE (with strongly conditioned input)
         total_moe_loss = 0.0
         routing_info = {}
         
@@ -431,10 +589,10 @@ class Model(nn.Module):
             
             for layer_idx in range(self.total_encoder_layers):
                 if layer_idx in self.moe_layer_indices:
-                    # Use MoE layer
+                    # Use MoE layer with weighted covariate embedding
                     moe_layer = self.moe_layers[str(layer_idx)]
                     enc_out, moe_loss, routing_weights = moe_layer(
-                        enc_out, combined_cov_embedding, attn_mask=enc_self_mask, tau=tau, delta=delta
+                        enc_out, weighted_invariant_cov, attn_mask=enc_self_mask, tau=tau, delta=delta
                     )
                     total_moe_loss += moe_loss
                     routing_info[f'layer_{layer_idx}'] = routing_weights
@@ -465,24 +623,55 @@ class Model(nn.Module):
         KL_z = self.KL_loss_normal(mean, logvar)
 
         dec_out = self.dec_embedding(x_dec_new, x_mark_dec)
-        # Add same covariate conditioning to decoder (time-invariant conditioning for VAE)
-        dec_out = dec_out + combined_cov_embedding.unsqueeze(1)
+        
+        # STRONG covariate conditioning for decoder (instead of simple addition)
+        # Apply FiLM conditioning to decoder
+        dec_cov_scale = self.dec_cov_scale_net(weighted_invariant_cov)  # [batch, d_model]
+        dec_cov_shift = self.dec_cov_shift_net(weighted_invariant_cov)  # [batch, d_model]
+        dec_cov_scale = dec_cov_scale.unsqueeze(1)  # [batch, 1, d_model]
+        dec_cov_shift = dec_cov_shift.unsqueeze(1)  # [batch, 1, d_model]
+        dec_out = dec_cov_scale * dec_out + dec_cov_shift
+        
+        # Cross-attention between decoder output and covariate information
+        dec_attended, dec_attn_weights = self.dec_cov_attention(
+            query=dec_out,  # [batch, seq_len, d_model]
+            key=covariate_tokens,   # [batch, 1 + seq_len, d_model] or [batch, 1, d_model]
+            value=covariate_tokens   # [batch, 1 + seq_len, d_model] or [batch, 1, d_model]
+        )
+        # Residual connection with learned gating
+        dec_gate = torch.sigmoid(torch.mean(dec_attn_weights, dim=-1, keepdim=True))  # [batch, seq_len, 1]
+        dec_out = dec_out + dec_gate * dec_attended
+        
+        # Apply decoder layers
         dec_out = self.decoder(dec_out, enc_out, x_mask=dec_self_mask, cross_mask=dec_enc_mask, tau=tau, delta=delta)
 
         # De-normalization
         dec_out = dec_out * std_enc + mean_enc
 
-        # Combine KL loss with MoE loss for compatibility
+        # Combine KL loss with MoE loss and contrastive loss for compatibility
         combined_KL_z = KL_z + self.moe_loss_weight * total_moe_loss
+        if self.use_contrastive_learning:
+            combined_KL_z = combined_KL_z + self.contrastive_loss_weight * contrastive_loss
 
         # Log routing statistics to wandb if available and enabled
         if self.use_moe and self.log_routing_stats and WANDB_AVAILABLE and routing_info:
             self._log_routing_statistics(routing_info, total_moe_loss)
+            
+        # Log contrastive learning statistics
+        if self.use_contrastive_learning and WANDB_AVAILABLE and self.training:
+            try:
+                wandb.log({
+                    "contrastive/loss": contrastive_loss.item() if isinstance(contrastive_loss, torch.Tensor) else 0.0,
+                    "contrastive/weight": self.contrastive_loss_weight,
+                    "contrastive/temperature": self.contrastive_context_learner.temperature if hasattr(self.contrastive_context_learner, 'temperature') else 0.1,
+                })
+            except Exception as e:
+                print(f"Error logging contrastive learning statistics: {e}")
 
         if self.output_attention:
             return dec_out[:, -self.pred_len:, :], attns
         else:
-            return dec_out[:, -self.pred_len:, :], dec_out, combined_KL_z, z_sample, combined_cov_embedding  # [B, L, D]
+            return dec_out[:, -self.pred_len:, :], dec_out, combined_KL_z, z_sample, combined_invariant_cov  # Return enriched covariates
 
     def get_routing_statistics(self, routing_info):
         """
@@ -625,6 +814,77 @@ class Model(nn.Module):
             # Continue silently to not interrupt training
             pass
 
+    def set_augmentation_strength(self, strength):
+        """
+        Dynamically set augmentation strength for contrastive learning
+        
+        Args:
+            strength: Float between 0.0 and 1.0
+        """
+        self.augmentation_strength = max(0.0, min(1.0, strength))
+    
+    def get_contrastive_learning_stats(self):
+        """
+        Get statistics about contrastive learning for analysis
+        
+        Returns:
+            Dictionary with contrastive learning statistics
+        """
+        stats = {}
+        
+        if self.use_contrastive_learning and hasattr(self, 'contrastive_context_learner'):
+            stats['enabled'] = True
+            stats['loss_weight'] = self.contrastive_loss_weight
+            stats['temperature'] = self.contrastive_context_learner.temperature
+            stats['use_momentum'] = self.contrastive_context_learner.use_momentum
+            stats['momentum_factor'] = self.contrastive_context_learner.momentum
+            stats['augmentation_strength'] = getattr(self, 'augmentation_strength', 0.1)
+        else:
+            stats['enabled'] = False
+            
+        return stats
+    
+    def _log_contrastive_learning_details(self, contrastive_loss, combined_invariant_cov, enriched_invariant_cov):
+        """
+        Log detailed contrastive learning statistics
+        
+        Args:
+            contrastive_loss: Current contrastive loss value
+            combined_invariant_cov: Original combined covariate embeddings
+            enriched_invariant_cov: Enriched covariate embeddings after contrastive learning
+        """
+        if not (WANDB_AVAILABLE and self.training):
+            return
+            
+        try:
+            # Compute representation similarity between original and enriched
+            cosine_sim = F.cosine_similarity(combined_invariant_cov, enriched_invariant_cov, dim=1)
+            representation_change = torch.norm(enriched_invariant_cov - combined_invariant_cov, p=2, dim=1)
+            
+            # Compute representation diversity within batch
+            batch_size = combined_invariant_cov.shape[0]
+            if batch_size > 1:
+                # Pairwise cosine similarities
+                norm_enriched = F.normalize(enriched_invariant_cov, p=2, dim=1)
+                similarity_matrix = torch.mm(norm_enriched, norm_enriched.t())
+                # Remove diagonal elements
+                mask = torch.eye(batch_size, device=similarity_matrix.device).bool()
+                off_diagonal_sims = similarity_matrix[~mask]
+                diversity_score = 1.0 - off_diagonal_sims.mean()
+            else:
+                diversity_score = torch.tensor(0.0)
+            
+            wandb.log({
+                "contrastive/representation_similarity": cosine_sim.mean().item(),
+                "contrastive/representation_change_norm": representation_change.mean().item(),
+                "contrastive/batch_diversity_score": diversity_score.item(),
+                "contrastive/enriched_embedding_norm": torch.norm(enriched_invariant_cov, p=2, dim=1).mean().item(),
+                "contrastive/original_embedding_norm": torch.norm(combined_invariant_cov, p=2, dim=1).mean().item(),
+            })
+            
+        except Exception as e:
+            print(f"Error in detailed contrastive logging: {e}")
+
 class ExpertNetwork(nn.Module):
     """
     Individual expert network - a smaller transformer encoder
@@ -674,6 +934,10 @@ class MixtureOfExperts(nn.Module):
         self.universal_expert_weight = universal_expert_weight
         self.configs = configs
         
+        # Gating mechanism for sparsity (optional)
+        self.use_sparse_gating = getattr(configs, 'use_sparse_gating', False)
+        self.top_k = getattr(configs, 'top_k_experts', 2)  # Use top-k experts
+        
         # Create expert networks (first num_universal_experts are universal, rest are specialized)
         self.experts = ModuleList([
             ExpertNetwork(configs, expert_id=i) for i in range(num_experts)
@@ -681,17 +945,51 @@ class MixtureOfExperts(nn.Module):
         
         # Router network that uses covariate embedding (only routes to specialized experts)
         if self.num_specialized_experts > 0:
+            # Enhanced router with covariate importance learning
+            self.cov_importance = nn.Sequential(
+                nn.Linear(configs.d_model, configs.d_model),
+                nn.Tanh(),
+                nn.Linear(configs.d_model, configs.d_model),
+                nn.Sigmoid()
+            )
+            
+            # Multi-level routing with attention to different covariate aspects
             self.specialized_router = nn.Sequential(
-                nn.Linear(configs.d_model, configs.d_model // 2),
-                nn.ReLU(),
+                nn.Linear(configs.d_model, configs.d_model),
+                nn.LayerNorm(configs.d_model),
+                nn.GELU(),
                 nn.Dropout(configs.dropout),
-                nn.Linear(configs.d_model // 2, self.num_specialized_experts),
+                nn.Linear(configs.d_model, configs.d_model // 2),
+                nn.LayerNorm(configs.d_model // 2),
+                nn.GELU(),
+                nn.Dropout(configs.dropout),
+                nn.Linear(configs.d_model // 2, self.num_specialized_experts)
+                # No softmax here - will apply with temperature
+            )
+            
+            # Hierarchical routing for expert groups
+            self.expert_group_router = nn.Sequential(
+                nn.Linear(configs.d_model, configs.d_model // 4),
+                nn.ReLU(),
+                nn.Linear(configs.d_model // 4, max(2, self.num_specialized_experts // 2)),
                 nn.Softmax(dim=-1)
             )
         
-        # Gating mechanism for sparsity (optional, only for specialized experts)
-        self.use_sparse_gating = getattr(configs, 'use_sparse_gating', False)
-        self.top_k = getattr(configs, 'top_k_experts', 2)  # Use top-k experts
+            # Temperature parameter for routing sharpness
+            self.routing_temperature = nn.Parameter(torch.ones(1))
+            
+            # FiLM conditioning for expert outputs
+            self.expert_cov_scale_net = nn.Sequential(
+                nn.Linear(configs.d_model, configs.d_model // 2),
+                nn.ReLU(),
+                nn.Linear(configs.d_model // 2, configs.d_model),
+                nn.Sigmoid()
+            )
+            self.expert_cov_shift_net = nn.Sequential(
+                nn.Linear(configs.d_model, configs.d_model // 2),
+                nn.ReLU(),
+                nn.Linear(configs.d_model // 2, configs.d_model)
+            )
 
     def forward(self, x, cov_embedding, attn_mask=None, tau=None, delta=None):
         """
@@ -716,13 +1014,33 @@ class MixtureOfExperts(nn.Module):
                 expert_out = self.experts[i](x, attn_mask=attn_mask, tau=tau, delta=delta)
                 mixed_output += universal_weight * expert_out
         
-        # 2. Specialized experts - routed based on covariate embedding
+        # 2. Specialized experts - routed based on covariate embedding with strong conditioning
         routing_weights_for_logging = None
         load_balancing_loss = 0.0
         
         if self.num_specialized_experts > 0:
-            # Compute routing weights for specialized experts only
-            specialized_routing_weights = self.specialized_router(cov_embedding)  # [batch_size, num_specialized_experts]
+            # Learn importance of covariate features for expert routing
+            cov_importance = self.cov_importance(cov_embedding)  # [batch, d_model]
+            weighted_cov = cov_embedding * cov_importance  # [batch, d_model]
+            
+            # Compute routing weights with temperature scaling and hierarchical routing
+            router_logits = self.specialized_router(weighted_cov)  # [batch, num_specialized_experts]
+            router_logits = router_logits / torch.clamp(self.routing_temperature, min=0.1, max=5.0)
+            
+            # Hierarchical routing - modulate expert selection by group preferences
+            group_weights = self.expert_group_router(weighted_cov)  # [batch, num_groups]
+            # Expand group weights to match expert dimensions
+            if group_weights.shape[1] < self.num_specialized_experts:
+                experts_per_group = self.num_specialized_experts // group_weights.shape[1]
+                group_expanded = group_weights.repeat_interleave(experts_per_group, dim=1)
+                if group_expanded.shape[1] < self.num_specialized_experts:
+                    remainder = self.num_specialized_experts - group_expanded.shape[1]
+                    group_expanded = torch.cat([group_expanded, group_weights[:, :remainder]], dim=1)
+                group_weights = group_expanded
+            
+            # Combine hierarchical and direct routing
+            combined_logits = router_logits + 0.5 * torch.log(group_weights + 1e-8)
+            specialized_routing_weights = F.softmax(combined_logits, dim=-1)
             
             # Apply sparse gating if enabled
             if self.use_sparse_gating:
@@ -742,9 +1060,17 @@ class MixtureOfExperts(nn.Module):
             # Store for logging
             routing_weights_for_logging = specialized_routing_weights.clone()  # [batch_size, num_specialized_experts]
             
-            # Get outputs from specialized experts and combine
+            # Get outputs from specialized experts with strong FiLM conditioning
             for i, specialist_idx in enumerate(range(self.num_universal_experts, self.num_experts)):
                 expert_out = self.experts[specialist_idx](x, attn_mask=attn_mask, tau=tau, delta=delta)
+                
+                # Apply strong FiLM conditioning to expert output
+                expert_cov_scale = self.expert_cov_scale_net(weighted_cov)  # [batch, d_model]
+                expert_cov_shift = self.expert_cov_shift_net(weighted_cov)  # [batch, d_model]
+                expert_cov_scale = expert_cov_scale.unsqueeze(1)  # [batch, 1, d_model]
+                expert_cov_shift = expert_cov_shift.unsqueeze(1)  # [batch, 1, d_model]
+                expert_out = expert_cov_scale * expert_out + expert_cov_shift
+                
                 # Apply routing weights: [batch_size, 1, 1] * [batch_size, seq_len, d_model]
                 weighted_output = specialized_routing_weights[:, i:i+1].unsqueeze(-1) * expert_out
                 mixed_output += weighted_output
@@ -788,3 +1114,229 @@ class MixtureOfExperts(nn.Module):
         load_loss = F.mse_loss(expert_usage, uniform_target)
         
         return load_loss
+
+class InfoNCELoss(nn.Module):
+    """
+    InfoNCE (Noise Contrastive Estimation) loss for learning better context representations
+    """
+    def __init__(self, temperature=0.1, negative_sampling='batch'):
+        super(InfoNCELoss, self).__init__()
+        self.temperature = temperature
+        self.negative_sampling = negative_sampling  # 'batch' or 'random'
+        
+    def forward(self, context_embeddings, augmented_embeddings=None):
+        """
+        Compute InfoNCE loss for context representation learning
+        
+        Args:
+            context_embeddings: [batch_size, d_model] - fused covariate embeddings
+            augmented_embeddings: [batch_size, d_model] - optional augmented version for positive pairs
+        """
+        batch_size = context_embeddings.shape[0]
+        device = context_embeddings.device
+        
+        if augmented_embeddings is None:
+            # Create augmented embeddings by adding noise to the original embeddings
+            noise_scale = 0.1
+            augmented_embeddings = context_embeddings + noise_scale * torch.randn_like(context_embeddings)
+        
+        # Normalize embeddings for cosine similarity
+        context_norm = F.normalize(context_embeddings, p=2, dim=1)  # [batch_size, d_model]
+        augmented_norm = F.normalize(augmented_embeddings, p=2, dim=1)  # [batch_size, d_model]
+        
+        # Compute similarity matrix
+        # Positive pairs: (context_i, augmented_i)
+        # Negative pairs: (context_i, augmented_j) where i != j
+        similarity_matrix = torch.mm(context_norm, augmented_norm.t()) / self.temperature  # [batch_size, batch_size]
+        
+        # Create labels - positive pairs are on the diagonal
+        labels = torch.arange(batch_size, device=device)
+        
+        # InfoNCE loss = negative log likelihood of positive pairs
+        infonce_loss = F.cross_entropy(similarity_matrix, labels)
+        
+        return infonce_loss
+
+
+class ContextAugmentation(nn.Module):
+    """
+    Context augmentation module for generating diverse representations
+    """
+    def __init__(self, d_model, dropout=0.1):
+        super(ContextAugmentation, self).__init__()
+        self.d_model = d_model
+        
+        # Learnable augmentation transformations
+        self.augment_projection = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.LayerNorm(d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, d_model)
+        )
+        
+        # Noise injection layers
+        self.noise_gate = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.Sigmoid()
+        )
+        
+        # Feature masking for contrastive learning
+        self.feature_mask_gate = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.Sigmoid()
+        )
+        
+        # Rotation transformation for invariance learning
+        self.rotation_matrix = nn.Parameter(torch.randn(d_model, d_model) * 0.02)
+        
+        # Mixup coefficient learning
+        self.mixup_weight = nn.Sequential(
+            nn.Linear(d_model, 1),
+            nn.Sigmoid()
+        )
+        
+    def forward(self, context_embeddings, augmentation_strength=0.1):
+        """
+        Generate augmented context embeddings with multiple augmentation strategies
+        
+        Args:
+            context_embeddings: [batch_size, d_model]
+            augmentation_strength: Strength of augmentation (0.0 to 1.0)
+        """
+        batch_size, d_model = context_embeddings.shape
+        device = context_embeddings.device
+        
+        # Strategy 1: Learnable transformation
+        transformed = self.augment_projection(context_embeddings)
+        
+        # Strategy 2: Adaptive noise injection
+        noise_weights = self.noise_gate(context_embeddings)
+        noise = torch.randn_like(context_embeddings) * augmentation_strength
+        adaptive_noise = noise_weights * noise
+        
+        # Strategy 3: Feature masking (dropout-like but learnable)
+        if self.training:
+            mask_weights = self.feature_mask_gate(context_embeddings)
+            feature_mask = torch.bernoulli(mask_weights * (1.0 - augmentation_strength))
+            masked_features = context_embeddings * feature_mask
+        else:
+            masked_features = context_embeddings
+            
+        # Strategy 4: Learnable rotation for geometric augmentation
+        # Normalize rotation matrix to be orthogonal (approximately)
+        U, _, V = torch.svd(self.rotation_matrix)
+        rotation_matrix = torch.mm(U, V.t())
+        rotated_features = torch.mm(context_embeddings, rotation_matrix) * augmentation_strength
+        
+        # Strategy 5: Self-mixup within batch
+        if batch_size > 1 and self.training:
+            # Get random permutation for mixup
+            perm_indices = torch.randperm(batch_size, device=device)
+            mixed_contexts = context_embeddings[perm_indices]
+            
+            # Learnable mixup weights
+            mixup_lambdas = self.mixup_weight(context_embeddings) * augmentation_strength
+            mixed_features = mixup_lambdas * context_embeddings + (1 - mixup_lambdas) * mixed_contexts
+        else:
+            mixed_features = context_embeddings
+        
+        # Combine all augmentation strategies
+        augmented = (context_embeddings + 
+                    0.3 * transformed + 
+                    adaptive_noise + 
+                    0.2 * (masked_features - context_embeddings) +
+                    0.1 * rotated_features +
+                    0.2 * (mixed_features - context_embeddings))
+        
+        return augmented
+
+
+class ContrastiveContextLearning(nn.Module):
+    """
+    Module for contrastive learning of context representations
+    """
+    def __init__(self, d_model, temperature=0.1, use_momentum=True, momentum=0.999):
+        super(ContrastiveContextLearning, self).__init__()
+        self.d_model = d_model
+        self.temperature = temperature
+        self.use_momentum = use_momentum
+        self.momentum = momentum
+        
+        # Context encoder for generating query representations
+        self.context_encoder = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.LayerNorm(d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model)
+        )
+        
+        # Momentum encoder for generating key representations (if using momentum)
+        if use_momentum:
+            self.momentum_encoder = nn.Sequential(
+                nn.Linear(d_model, d_model),
+                nn.LayerNorm(d_model),
+                nn.GELU(),
+                nn.Linear(d_model, d_model)
+            )
+            # Initialize momentum encoder with same weights as context encoder
+            self._initialize_momentum_encoder()
+        
+        # Context augmentation
+        self.augmentation = ContextAugmentation(d_model)
+        
+        # InfoNCE loss
+        self.infonce_loss = InfoNCELoss(temperature=temperature)
+        
+    def _initialize_momentum_encoder(self):
+        """Initialize momentum encoder with context encoder weights"""
+        for param_q, param_k in zip(self.context_encoder.parameters(), self.momentum_encoder.parameters()):
+            param_k.data.copy_(param_q.data)
+            param_k.requires_grad = False
+    
+    def _update_momentum_encoder(self):
+        """Update momentum encoder with exponential moving average"""
+        if not self.use_momentum:
+            return
+            
+        for param_q, param_k in zip(self.context_encoder.parameters(), self.momentum_encoder.parameters()):
+            param_k.data = param_k.data * self.momentum + param_q.data * (1.0 - self.momentum)
+    
+    def forward(self, context_embeddings, augmentation_strength=0.1):
+        """
+        Perform contrastive learning on context embeddings
+        
+        Args:
+            context_embeddings: [batch_size, d_model] - fused covariate embeddings
+            augmentation_strength: Strength of data augmentation
+            
+        Returns:
+            contrastive_loss: InfoNCE loss for representation learning
+            enriched_embeddings: Enhanced context representations
+        """
+        batch_size = context_embeddings.shape[0]
+        
+        # Generate query representations
+        query_embeddings = self.context_encoder(context_embeddings)  # [batch_size, d_model]
+        
+        # Generate augmented positive examples
+        augmented_contexts = self.augmentation(context_embeddings, augmentation_strength)
+        
+        if self.use_momentum:
+            # Generate key representations using momentum encoder
+            with torch.no_grad():
+                key_embeddings = self.momentum_encoder(augmented_contexts)
+                # Update momentum encoder
+                if self.training:
+                    self._update_momentum_encoder()
+        else:
+            # Use the same encoder for keys
+            key_embeddings = self.context_encoder(augmented_contexts)
+        
+        # Compute InfoNCE loss
+        contrastive_loss = self.infonce_loss(query_embeddings, key_embeddings)
+        
+        # Enhanced representations combine original and learned features
+        enriched_embeddings = context_embeddings + 0.2 * query_embeddings
+        
+        return contrastive_loss, enriched_embeddings

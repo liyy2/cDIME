@@ -46,7 +46,7 @@ parser.add_argument('--generative_model', type=str, default='flow_matching', cho
 
 # data loader
 parser.add_argument('--data_pretrain', type=str, required=False, default='ETTm1', help='dataset type')
-parser.add_argument('--root_path', type=str, default='/home/yl2428/Time-LLM/dataset', help='root path of the data file')
+parser.add_argument('--root_path', type=str, default='/gpfs/gibbs/pi/gerstein/yl2428/Time-LLM/dataset', help='root path of the data file')
 parser.add_argument('--data_path', type=str, default='ETTh1.csv', help='data file')
 parser.add_argument('--data_path_pretrain', type=str, default='ETTh1.csv', help='data file')
 parser.add_argument('--features', type=str, default='M',
@@ -59,8 +59,8 @@ parser.add_argument('--freq', type=str, default='t',
                     help='freq for time features encoding, '
                          'options:[s:secondly, t:minutely, h:hourly, d:daily, b:business days, w:weekly, m:monthly], '
                          'you can also use more detailed freq like 15min or 3h')
-parser.add_argument('--checkpoints', type=str, default='/home/yl2428/checkpoints/', help='location of model checkpoints')
-parser.add_argument('--log_dir', type=str, default='/home/yl2428/logs', help='location of log')
+parser.add_argument('--checkpoints', type=str, default='/gpfs/gibbs/pi/gerstein/yl2428/checkpoints', help='location of model checkpoints')
+parser.add_argument('--log_dir', type=str, default='/gpfs/gibbs/pi/gerstein/yl2428/logs', help='location of log')
 # forecasting task
 parser.add_argument('--seq_len', type=int, default=96, help='input sequence length')
 parser.add_argument('--label_len', type=int, default=48, help='start token length')
@@ -151,7 +151,7 @@ parser.add_argument('--p_hidden_dims', type=int, nargs='+', default=[64, 64],
 parser.add_argument('--p_hidden_layers', type=int, default=2, help='number of hidden layers in projector')
 
 # Configuration file (used by both diffusion and flow matching)
-parser.add_argument('--diffusion_config_dir', type=str, default='/home/yl2428/Time-LLM/models/model9_NS_transformer/configs/toy_8gauss.yml',
+parser.add_argument('--diffusion_config_dir', type=str, default='/gpfs/gibbs/pi/gerstein/yl2428/Time-LLM/models/model9_NS_transformer/configs/toy_8gauss.yml',
                     help='Config file for diffusion/flow matching model')
 
 # parser.add_argument('--cond_pred_model_dir', type=str,
@@ -213,7 +213,7 @@ for ii in range(args.itr):
     if args.wandb:
         wandb.login(key=args.wandb_api_key, relogin=True)
         wandb_logger = WandbLogger(
-                                project='Glucose Forecasting',
+                                project='Glucose Diffusion',
                                 group = args.wandb_group,
                                 settings=wandb.Settings(start_method='fork', code_dir="."),
                                 config=args,
@@ -232,7 +232,7 @@ for ii in range(args.itr):
     checkpoint_path = os.path.join(args.log_dir, args.model, args.generative_model, str(run_name), 'checkpoints')
     callbacks.append(ModelCheckpoint(
         dirpath=checkpoint_path,
-        monitor="val_mae",
+        monitor="val_mean_mae",
         save_top_k=1,  # -1 to save all
         filename="{epoch}-{step}-{val_loss:.4f}",
         save_last=True,

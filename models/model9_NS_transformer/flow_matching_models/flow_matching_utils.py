@@ -98,8 +98,15 @@ class ODEFunc(torch.nn.Module):
         # Scale from [0,1] to [0, num_timesteps-1] 
         t_discrete = (t * (self.model.num_timesteps - 1)).long().clamp(0, self.model.num_timesteps - 1)
         
-        # Get velocity prediction from model
-        velocity = self.model(self.x, self.x_mark, 0, y, self.y_0_hat, t_discrete, cov_embedding=self.cov_embedding)
+        # Get velocity prediction from model (handle both old and new return formats)
+        model_output = self.model(self.x, self.x_mark, 0, y, self.y_0_hat, t_discrete, cov_embedding=self.cov_embedding)
+        
+        if isinstance(model_output, tuple):
+            # New format with MoE support - we only need the velocity for ODE integration
+            velocity = model_output[0]
+        else:
+            # Old format (backward compatibility)
+            velocity = model_output
         
         return velocity
 
@@ -181,13 +188,77 @@ def flow_matching_loss(model, x, x_mark, y_0, y_0_hat, t, cov_embedding=None,
     # Convert continuous time to discrete timesteps for model
     t_discrete = (t * (model.num_timesteps - 1)).long().clamp(0, model.num_timesteps - 1)
     
-    # Predict velocity
-    predicted_velocity = model(x, x_mark, 0, y_t, y_0_hat, t_discrete, cov_embedding=cov_embedding)
+    # Predict velocity (handle both old and new return formats)
+    model_output = model(x, x_mark, 0, y_t, y_0_hat, t_discrete, cov_embedding=cov_embedding)
+    
+    if isinstance(model_output, tuple):
+        # New format with MoE support
+        predicted_velocity = model_output[0]
+    else:
+        # Old format (backward compatibility)
+        predicted_velocity = model_output
     
     # Compute loss (MSE between predicted and target velocity)
     loss = torch.nn.functional.mse_loss(predicted_velocity, target_velocity)
     
     return loss
+
+
+def flow_matching_loss_with_moe(model, x, x_mark, y_0, y_0_hat, t, cov_embedding=None, 
+                                noise_type="gaussian", interpolation_type="linear", 
+                                moe_loss_weight=0.01):
+    """
+    Compute flow matching loss with MoE load balancing loss
+    
+    Args:
+        model: Flow matching model
+        x: Input conditions
+        x_mark: Input time marks
+        y_0: Target data (clean)
+        y_0_hat: Conditional prediction
+        t: Sampled timesteps [0, 1]
+        cov_embedding: Covariate embedding for conditioning
+        noise_type: Type of noise for y_1
+        interpolation_type: Type of interpolation
+        moe_loss_weight: Weight for MoE load balancing loss
+    
+    Returns:
+        total_loss: Flow matching loss + weighted load balancing loss
+        loss_dict: Dictionary containing individual loss components
+    """
+    # Sample noise for y_1
+    if noise_type == "gaussian":
+        y_1 = torch.randn_like(y_0) + y_0_hat  # Noise around conditional prediction
+    else:
+        raise NotImplementedError(f"Noise type {noise_type} not implemented")
+    
+    # Interpolate to get y_t
+    y_t = interpolate_data(y_0, y_1, t, interpolation_type)
+    
+    # Compute target velocity
+    target_velocity = compute_velocity_target(y_0, y_1, interpolation_type)
+    
+    # Convert continuous time to discrete timesteps for model
+    t_discrete = (t * (model.num_timesteps - 1)).long().clamp(0, model.num_timesteps - 1)
+    
+    # Predict velocity and get MoE losses
+    predicted_velocity, load_balancing_loss, routing_info = model(x, x_mark, 0, y_t, y_0_hat, t_discrete, cov_embedding=cov_embedding)
+    
+    # Compute main flow matching loss (MSE between predicted and target velocity)
+    flow_loss = torch.nn.functional.mse_loss(predicted_velocity, target_velocity)
+    
+    # Combine losses
+    total_loss = flow_loss + moe_loss_weight * load_balancing_loss
+    
+    # Return loss components for logging
+    loss_dict = {
+        'flow_loss': flow_loss,
+        'load_balancing_loss': load_balancing_loss,
+        'total_loss': total_loss,
+        'routing_info': routing_info
+    }
+    
+    return total_loss, loss_dict
 
 
 # Evaluation with KLD (same as diffusion)
