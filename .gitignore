@@ -10,3 +10,4 @@ wandb/
 *.log
 lightning_logs/*
 logs/*
+*.zip
