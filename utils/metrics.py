@@ -1,4 +1,5 @@
 import numpy as np
+from scipy import stats
 
 
 def RSE(pred, true):
@@ -52,6 +53,179 @@ def CV_ERROR(pred, true):
     if mean_true == 0:
         return float('inf')  # Avoid division by zero
     return (rmse / abs(mean_true)) * 100
+
+
+def CRPS(pred_samples, true, method='ensemble'):
+    """
+    Calculate the Continuous Ranked Probability Score (CRPS) for probabilistic forecasting.
+    
+    CRPS measures the quality of probabilistic predictions by evaluating both calibration 
+    and sharpness. Lower CRPS values indicate better probabilistic forecasts.
+    
+    Args:
+        pred_samples: Probabilistic predictions, shape depends on method:
+            - 'ensemble': (n_samples, ...) - ensemble members/samples from predictive distribution
+            - 'gaussian': (2, ...) - mean and std of Gaussian distribution [mean, std]
+            - 'quantile': (n_quantiles, ...) - quantile predictions
+        true: Ground truth values with shape (...) matching the last dims of pred_samples
+        method: Method for CRPS calculation:
+            - 'ensemble': Empirical CRPS from ensemble members or samples
+            - 'gaussian': Analytical CRPS for Gaussian distribution
+            - 'quantile': CRPS from quantile predictions
+    
+    Returns:
+        CRPS score (lower is better)
+    """
+    if method == 'ensemble':
+        # Empirical CRPS from ensemble members
+        # pred_samples shape: (n_samples, ...)
+        n_samples = pred_samples.shape[0]
+        
+        # Calculate first term: E|Y - y|
+        first_term = np.mean(np.abs(pred_samples - true[np.newaxis, ...]), axis=0)
+        
+        # Calculate second term: 0.5 * E|Y - Y'|
+        # This requires computing pairwise differences between ensemble members
+        second_term = 0.0
+        for i in range(n_samples):
+            for j in range(i + 1, n_samples):
+                second_term += np.abs(pred_samples[i] - pred_samples[j])
+        second_term = second_term / (n_samples * (n_samples - 1))
+        
+        crps = np.mean(first_term - second_term)
+        
+    elif method == 'gaussian':
+        # Analytical CRPS for Gaussian distribution
+        # pred_samples shape: (2, ...) where [0] is mean, [1] is std
+        mean = pred_samples[0]
+        std = pred_samples[1]
+        
+        # Avoid division by zero
+        std = np.maximum(std, 1e-8)
+        
+        # Standardized error
+        z = (true - mean) / std
+        
+        # Analytical formula for Gaussian CRPS
+        phi = stats.norm.pdf(z)  # Standard normal PDF
+        Phi = stats.norm.cdf(z)  # Standard normal CDF
+        
+        crps = std * (z * (2 * Phi - 1) + 2 * phi - 1 / np.sqrt(np.pi))
+        crps = np.mean(crps)
+        
+    elif method == 'quantile':
+        # CRPS from quantile predictions
+        # pred_samples shape: (n_quantiles, ...)
+        n_quantiles = pred_samples.shape[0]
+        
+        # Quantile levels (assumed to be equally spaced)
+        tau = np.linspace(0, 1, n_quantiles + 2)[1:-1]  # Exclude 0 and 1
+        
+        # Sort quantiles to ensure monotonicity
+        pred_sorted = np.sort(pred_samples, axis=0)
+        
+        # Compute CRPS using quantile decomposition
+        crps = 0.0
+        for i, q in enumerate(tau):
+            indicator = (true <= pred_sorted[i]).astype(float)
+            crps += 2 * np.mean((indicator - q) * (pred_sorted[i] - true))
+        
+    else:
+        raise ValueError(f"Unknown method: {method}. Choose 'ensemble', 'gaussian', or 'quantile'.")
+    
+    return crps
+
+
+def energy_score(pred_samples, true, beta=1.0):
+    """
+    Calculate the Energy Score for multivariate probabilistic forecasting.
+    
+    The Energy Score is a multivariate generalization of CRPS that accounts for
+    correlations between different dimensions of the forecast.
+    
+    Args:
+        pred_samples: Ensemble predictions with shape (n_samples, ..., n_dims)
+        true: Ground truth with shape (..., n_dims)
+        beta: Power parameter (typically 1.0 for L2 norm)
+    
+    Returns:
+        Energy score (lower is better)
+    """
+    n_samples = pred_samples.shape[0]
+    
+    # First term: E||Y - y||^beta
+    first_term = np.mean(np.linalg.norm(pred_samples - true[np.newaxis, ...], 
+                                        axis=-1, ord=2) ** beta, axis=0)
+    
+    # Second term: 0.5 * E||Y - Y'||^beta
+    second_term = 0.0
+    for i in range(n_samples):
+        for j in range(i + 1, n_samples):
+            second_term += np.linalg.norm(pred_samples[i] - pred_samples[j], 
+                                         axis=-1, ord=2) ** beta
+    second_term = np.mean(second_term / (n_samples * (n_samples - 1)))
+    
+    es = np.mean(first_term - 0.5 * second_term)
+    return es
+
+
+def interval_score(lower, upper, true, alpha=0.1):
+    """
+    Calculate the Interval Score for prediction intervals.
+    
+    The Interval Score penalizes both interval width (sharpness) and 
+    coverage violations (calibration).
+    
+    Args:
+        lower: Lower bound of prediction interval
+        upper: Upper bound of prediction interval
+        true: Ground truth values
+        alpha: Significance level (e.g., 0.1 for 90% prediction interval)
+    
+    Returns:
+        Interval score (lower is better)
+    """
+    # Width of the interval
+    width = upper - lower
+    
+    # Penalty for observations outside the interval
+    lower_penalty = (2 / alpha) * np.maximum(lower - true, 0)
+    upper_penalty = (2 / alpha) * np.maximum(true - upper, 0)
+    
+    # Total interval score
+    is_score = width + lower_penalty + upper_penalty
+    
+    return np.mean(is_score)
+
+
+def coverage_probability(lower, upper, true):
+    """
+    Calculate the empirical coverage probability of prediction intervals.
+    
+    Args:
+        lower: Lower bound of prediction interval
+        upper: Upper bound of prediction interval
+        true: Ground truth values
+    
+    Returns:
+        Coverage probability (should match nominal level, e.g., 0.9 for 90% PI)
+    """
+    within_interval = (true >= lower) & (true <= upper)
+    return np.mean(within_interval)
+
+
+def prediction_interval_width(lower, upper):
+    """
+    Calculate the average width of prediction intervals.
+    
+    Args:
+        lower: Lower bound of prediction interval
+        upper: Upper bound of prediction interval
+    
+    Returns:
+        Average interval width (lower indicates sharper predictions)
+    """
+    return np.mean(upper - lower)
 
 
 def denormalize_glucose(data, mean=144.91148743, std=55.13396884):

@@ -28,6 +28,31 @@ def ccc(id, pred, true):
         res_box[i] = res[0]
     return res_box
 
+def compute_crps_simple(ensemble_predictions, true_value):
+    """
+    Simple CRPS computation for ensemble predictions.
+    
+    Args:
+        ensemble_predictions: Array of ensemble predictions for a single point
+        true_value: Single true value
+    
+    Returns:
+        CRPS score (lower is better)
+    """
+    n = len(ensemble_predictions)
+    
+    # Term 1: Average distance from predictions to truth
+    term1 = np.mean(np.abs(ensemble_predictions - true_value))
+    
+    # Term 2: Average pairwise distances between predictions (spread)
+    term2 = 0
+    for i in range(n):
+        for j in range(i+1, n):
+            term2 += np.abs(ensemble_predictions[i] - ensemble_predictions[j])
+    term2 = term2 / (n * (n-1)) if n > 1 else 0
+    
+    return term1 - term2
+
 def log_normal(x, mu, var):
     eps = 1e-8
     if eps > 0.0:
@@ -284,6 +309,32 @@ class TimeSeriesFlowMatchingModel(pl.LightningModule):
             for key, value in comprehensive_metrics_percentile.items():
                 self.log(f'val_p{percentile}_{key}', value)
 
+        # Compute CRPS - single score for entire probabilistic forecast
+        # all_preds shape: (batch_size, n_samples, pred_len, features)
+        # all_trues shape: (batch_size, pred_len, features)
+        crps_scores = []
+        batch_size, n_samples, pred_len, n_features = all_preds.shape
+        
+        for b in range(batch_size):
+            for t in range(pred_len):
+                for f in range(n_features):
+                    ensemble = all_preds[b, :, t, f]  # All samples for this point
+                    truth = all_trues[b, t, f]
+                    crps = compute_crps_simple(ensemble, truth)
+                    crps_scores.append(crps)
+        
+        avg_crps = np.mean(crps_scores)
+        self.log('val_crps', avg_crps)
+        
+        # Additional uncertainty metrics (separate from CRPS)
+        # Prediction interval coverage - measures calibration
+        lower_5 = np.percentile(all_preds, 5, axis=1)
+        upper_95 = np.percentile(all_preds, 95, axis=1)
+        coverage_90 = np.mean((all_trues >= lower_5) & (all_trues <= upper_95))
+        pi_width_90 = np.mean(upper_95 - lower_5)
+        self.log('val_coverage_90', coverage_90)  # Should be ~0.9 if well calibrated
+        self.log('val_pi_width_90', pi_width_90)  # Lower is sharper/better
+
         self.sample_outputs = []
 
     def on_test_epoch_end(self):
@@ -308,6 +359,29 @@ class TimeSeriesFlowMatchingModel(pl.LightningModule):
             comprehensive_metrics_percentile = comprehensive_metric(preds_percentile, trues_ns)
             for key, value in comprehensive_metrics_percentile.items():
                 self.log(f'test_p{percentile}_{key}', value)
+
+        # Compute CRPS - single score for entire probabilistic forecast
+        crps_scores = []
+        batch_size, n_samples, pred_len, n_features = all_preds.shape
+        
+        for b in range(batch_size):
+            for t in range(pred_len):
+                for f in range(n_features):
+                    ensemble = all_preds[b, :, t, f]
+                    truth = all_trues[b, t, f]
+                    crps = compute_crps_simple(ensemble, truth)
+                    crps_scores.append(crps)
+        
+        avg_crps = np.mean(crps_scores)
+        self.log('test_crps', avg_crps)
+        
+        # Additional uncertainty metrics
+        lower_5 = np.percentile(all_preds, 5, axis=1)
+        upper_95 = np.percentile(all_preds, 95, axis=1)
+        coverage_90 = np.mean((all_trues >= lower_5) & (all_trues <= upper_95))
+        pi_width_90 = np.mean(upper_95 - lower_5)
+        self.log('test_coverage_90', coverage_90)
+        self.log('test_pi_width_90', pi_width_90)
 
         # save the outputs
         np.save(os.path.join(self.args.log_dir, 'outputs.npy'), all_preds)
