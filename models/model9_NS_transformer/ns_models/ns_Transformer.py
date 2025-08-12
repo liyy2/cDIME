@@ -388,7 +388,7 @@ class Model(nn.Module):
         
         # Covariate fusion layer to combine tabular and time-series covariates
         self.covariate_fusion = nn.Sequential(
-            nn.Linear(configs.d_model * 2, configs.d_model),  # Combine tabular + time-series
+            nn.Linear(configs.d_model * 7, configs.d_model),  # Combine tabular + time-series
             nn.ReLU(),
             nn.Dropout(configs.dropout),
             nn.Linear(configs.d_model, configs.d_model)
@@ -444,6 +444,8 @@ class Model(nn.Module):
         # Contrastive context learning for enriching covariate representations
         self.use_contrastive_learning = getattr(configs, 'use_contrastive_learning', True)
         self.contrastive_loss_weight = getattr(configs, 'contrastive_loss_weight', 0.1)
+        self.glucose_dropout_rate= getattr(configs, 'glucose_dropout_rate', 0.4)
+        self.glucose_dropout = nn.Dropout(self.glucose_dropout_rate)
         if self.use_contrastive_learning:
             self.contrastive_context_learner = ContrastiveContextLearning(
                 d_model=configs.d_model,
@@ -477,6 +479,7 @@ class Model(nn.Module):
         # IMPORTANT: Only use encoder data for time-series covariates to prevent future data leakage
         # Separate glucose (last channel) from time-series covariates
         x_glucose = x_enc[:, :, -self.glucose_channels:]  # [B, seq_len, 1] - glucose channel (historical only)
+        x_glucose = self.glucose_dropout(x_glucose)
         x_ts_covariates = x_enc[:, :, -self.glucose_channels:]  if self.ts_covariate_channels == 1 else x_enc[:, :, :] # [B, seq_len, C-1] (historical only)
         
         # For decoder, ONLY extract glucose from x_dec (no time-series covariates to prevent leakage)
@@ -487,6 +490,10 @@ class Model(nn.Module):
         tabular_cov_embedding = tabular_cov_embedding.reshape(tabular_cov_embedding.shape[0], -1) # [B, 192]
         # Process time-series covariates ONLY from historical encoder data (no future data)
         if self.ts_covariate_channels > 0 and x_ts_covariates is not None:
+
+
+
+            
             # Use only historical time-series covariates from encoder to get both representations
             ts_cov_invariant, ts_cov_dynamic = self.ts_cov_encoder(x_ts_covariates)  # [B, d_model], [B, seq_len, d_model]
             
