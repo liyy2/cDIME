@@ -25,7 +25,7 @@ def data_provider(args, data, data_path, pretrain=True, flag='train'):
     timeenc = 0 if args.embed != 'timeF' else 1
     percent = args.percent
     if flag == 'test':
-        shuffle_flag = False
+        shuffle_flag = True
         drop_last = True
         batch_size = args.batch_size
         freq = args.freq

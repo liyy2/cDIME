@@ -55,8 +55,8 @@ parser.add_argument('--freq', type=str, default='t',
                     help='freq for time features encoding, '
                          'options:[s:secondly, t:minutely, h:hourly, d:daily, b:business days, w:weekly, m:monthly], '
                          'you can also use more detailed freq like 15min or 3h')
-parser.add_argument('--checkpoints', type=str, default='/gpfs/gibbs/pi/gerstein/yl2428/checkpoints/', help='location of model checkpoints')
-parser.add_argument('--log_dir', type=str, default='/gpfs/gibbs/pi/gerstein/yl2428/logs', help='location of log')
+parser.add_argument('--checkpoints', type=str, default='/home/yl2428/checkpoints', help='location of model checkpoints')
+parser.add_argument('--log_dir', type=str, default='/home/yl2428/logs', help='location of log')
 # forecasting task
 parser.add_argument('--seq_len', type=int, default=96, help='input sequence length')
 parser.add_argument('--label_len', type=int, default=48, help='start token length')
@@ -127,6 +127,18 @@ parser.add_argument('--down_sampling_method', type=str, default='avg',
                     help='down sampling method, only support avg, max, conv')
 parser.add_argument('--use_future_temporal_feature', type=int, default=0,
                     help='whether to use future_temporal_feature; True 1 False 0')
+parser.add_argument('--use_moe', type=int, default=0,
+                    help='whether to use MOE; True 1 False 0')
+parser.add_argument('--num_experts', type=int, default=4,
+                    help='number of experts in MOE')
+parser.add_argument('--top_k_experts', type=int, default=4,
+                    help='top k experts in MOE')
+parser.add_argument('--moe_loss_weight', type=float, default=0.01,
+                    help='weight of MOE loss')
+parser.add_argument('--log_routing_stats', type=int, default=0,
+                    help='whether to log routing stats; True 1 False 0')
+parser.add_argument('--enable_context_aware', type=int, default=0,
+                    help='whether to enable context aware; True 1 False 0')
 
 
 

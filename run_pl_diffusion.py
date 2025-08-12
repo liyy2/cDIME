@@ -46,7 +46,7 @@ parser.add_argument('--generative_model', type=str, default='flow_matching', cho
 
 # data loader
 parser.add_argument('--data_pretrain', type=str, required=False, default='ETTm1', help='dataset type')
-parser.add_argument('--root_path', type=str, default='/gpfs/gibbs/pi/gerstein/yl2428/Time-LLM/dataset', help='root path of the data file')
+parser.add_argument('--root_path', type=str, default='/home/yl2428/Time-LLM/dataset', help='root path of the data file')
 parser.add_argument('--data_path', type=str, default='ETTh1.csv', help='data file')
 parser.add_argument('--data_path_pretrain', type=str, default='ETTh1.csv', help='data file')
 parser.add_argument('--features', type=str, default='M',
@@ -59,8 +59,8 @@ parser.add_argument('--freq', type=str, default='t',
                     help='freq for time features encoding, '
                          'options:[s:secondly, t:minutely, h:hourly, d:daily, b:business days, w:weekly, m:monthly], '
                          'you can also use more detailed freq like 15min or 3h')
-parser.add_argument('--checkpoints', type=str, default='/gpfs/gibbs/pi/gerstein/yl2428/checkpoints', help='location of model checkpoints')
-parser.add_argument('--log_dir', type=str, default='/gpfs/gibbs/pi/gerstein/yl2428/logs', help='location of log')
+parser.add_argument('--checkpoints', type=str, default='/home/yl2428/checkpoints', help='location of model checkpoints')
+parser.add_argument('--log_dir', type=str, default='/home/yl2428/logs', help='location of log')
 # forecasting task
 parser.add_argument('--seq_len', type=int, default=96, help='input sequence length')
 parser.add_argument('--label_len', type=int, default=48, help='start token length')
@@ -151,7 +151,7 @@ parser.add_argument('--p_hidden_dims', type=int, nargs='+', default=[64, 64],
 parser.add_argument('--p_hidden_layers', type=int, default=2, help='number of hidden layers in projector')
 
 # Configuration file (used by both diffusion and flow matching)
-parser.add_argument('--diffusion_config_dir', type=str, default='/gpfs/gibbs/pi/gerstein/yl2428/Time-LLM/models/model9_NS_transformer/configs/toy_8gauss.yml',
+parser.add_argument('--diffusion_config_dir', type=str, default='/home/yl2428/Time-LLM/models/model9_NS_transformer/configs/toy_8gauss.yml',
                     help='Config file for diffusion/flow matching model')
 
 # parser.add_argument('--cond_pred_model_dir', type=str,
@@ -178,6 +178,9 @@ parser.add_argument('--enable_context_aware', type=int, default=1, help='Use con
 
 args = parser.parse_args()
 
+
+
+
 # Adjust default timesteps based on generative model type
 if args.generative_model == 'flow_matching' and args.timesteps == 1000:
     print("Flow matching detected: reducing default timesteps from 1000 to 50 for better efficiency")
@@ -187,6 +190,11 @@ for ii in range(args.itr):
     train_data, train_loader, args = data_provider(args, args.data_pretrain, args.data_path_pretrain, True, 'train')
     vali_data, vali_loader, args = data_provider(args, args.data_pretrain, args.data_path_pretrain, True, 'val')
     test_data, test_loader, args = data_provider(args, args.data_pretrain, args.data_path_pretrain, False, 'test')
+    # save the args as pth file
+    run_name =  time.strftime('%Y-%m-%d-%H-%M-%S')
+    if not os.path.exists(os.path.join(args.log_dir, args.model, args.generative_model, run_name)):
+        os.makedirs(os.path.join(args.log_dir, args.model, args.generative_model, run_name))
+    torch.save(args, os.path.join(args.log_dir, args.model, args.generative_model, run_name,  'args.pth'))
     
     # Model selection based on generative_model argument
     print(f"Initializing {args.generative_model} model...")
@@ -259,7 +267,7 @@ for ii in range(args.itr):
         callbacks=callbacks,
         precision=args.precision,
         enable_checkpointing=True,
-        gradient_clip_val=0.5,
+        gradient_clip_val=1.0,
         gradient_clip_algorithm='norm',
         accumulate_grad_batches=args.gradient_accumulation_steps, 
         default_root_dir=checkpoint_path)

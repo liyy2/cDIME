@@ -7,30 +7,30 @@
 #SBATCH --cpus-per-task=8
 
 model_name=ns_Transformer
-learning_rate=0.0004
+learning_rate=0.00005
 llama_layers=32
 master_port=8889
-batch_size=64
+batch_size=48
 d_model=32
-d_ff=128
-comment='NEW_DATASET_NON_CONTEXTUAL'
+d_ff=256
+comment='TimeLLM-ECL'
 
 eval "$(conda shell.bash hook)"
-conda activate Time-LLM
+conda activate cDIME
 
-python run_pl_diffusion.py \
+CUDA_VISIBLE_DEVICES=0 python run_pl_diffusion.py \
   --task_name long_term_forecast \
-  --num_nodes 4 \
+  --num_nodes 1 \
   --is_training 1 \
   --precision 32 \
-  --root_path /gpfs/gibbs/pi/gerstein/yl2428/Time-LLM/dataset/glucose \
-  --data_path_pretrain aligned_data/output_Junt_16_3.csv \
-  --data_path aligned_data/output_Junt_16_3.csv \
+  --root_path /home/yl2428/Time-LLM/dataset/glucose \
+  --data_path_pretrain output_Junt_16_3.csv\
+  --data_path output_Junt_16_3.csv \
   --model_id ETTh1_ETTh2_512_192 \
   --model $model_name \
   --data_pretrain Glucose \
   --features MS \
-  --seq_len 108 \
+  --seq_len 72 \
   --label_len 32 \
   --pred_len 48 \
   --factor 3 \
@@ -47,4 +47,14 @@ python run_pl_diffusion.py \
   --train_epochs 100 \
   --enable_covariates 1 \
   --num_individuals -1 \
-  --enable_context_aware 1
+  --use_moe 1 \
+  --num_experts 8 \
+  --top_k_experts 4 \
+  --moe_loss_weight 0.01 \
+  --log_routing_stats 1 \
+  --stride 1 \
+  --use_deep_speed 1  \
+  --enable_context_aware 1 \
+  --k_z 1e-3 \
+  --k_cond 1e-3 \
+  --patience 40 
