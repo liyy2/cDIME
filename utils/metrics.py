@@ -1,5 +1,7 @@
 import numpy as np
 from scipy import stats
+from sklearn.metrics import roc_auc_score, roc_curve
+import matplotlib.pyplot as plt
 
 
 def RSE(pred, true):
@@ -260,15 +262,15 @@ def hypoglycemia_sensitivity_specificity(pred, true, threshold_mg_dl, time_horiz
     if pred_denorm.shape[-2] < time_horizon_steps:
         time_horizon_steps = pred_denorm.shape[-2]
     
-    # Extract predictions and ground truth at the specified time horizon
-    # pred_at_horizon: predictions at time_horizon_steps ahead
-    # true_at_horizon: ground truth at time_horizon_steps ahead
-    pred_at_horizon = pred_denorm[:, time_horizon_steps-1, -1]  # Last channel is glucose
-    true_at_horizon = true_denorm[:, time_horizon_steps-1, -1]  # Last channel is glucose
+    # Check if ANY of the future timesteps (up to time_horizon_steps) fall below threshold
+    # pred_future: predictions for all future timesteps up to horizon
+    # true_future: ground truth for all future timesteps up to horizon
+    pred_future = pred_denorm[:, :time_horizon_steps, -1]  # [batch, time_horizon, glucose_channel]
+    true_future = true_denorm[:, :time_horizon_steps, -1]  # [batch, time_horizon, glucose_channel]
     
-    # Binary classification: hypoglycemia (below threshold) vs normal
-    pred_hypo = pred_at_horizon < threshold_mg_dl
-    true_hypo = true_at_horizon < threshold_mg_dl
+    # Binary classification: hypoglycemia if ANY future timestep is below threshold
+    pred_hypo = np.any(pred_future < threshold_mg_dl, axis=1)  # Check across all timesteps
+    true_hypo = np.any(true_future < threshold_mg_dl, axis=1)  # Check across all timesteps
     
     # Calculate confusion matrix elements
     true_positives = np.sum((pred_hypo == True) & (true_hypo == True))
@@ -283,6 +285,61 @@ def hypoglycemia_sensitivity_specificity(pred, true, threshold_mg_dl, time_horiz
     npv = true_negatives / (true_negatives + false_negatives) if (true_negatives + false_negatives) > 0 else 0.0
     
     return sensitivity, specificity, ppv, npv
+
+
+def hypoglycemia_auroc(pred, true, threshold_mg_dl, time_horizon_steps, 
+                       glucose_mean=144.91148743, glucose_std=55.13396884):
+    """
+    Calculate AUROC (Area Under ROC Curve) for hypoglycemia prediction.
+    
+    Args:
+        pred: predictions (normalized glucose values)
+        true: ground truth (normalized glucose values) 
+        threshold_mg_dl: glucose threshold in mg/dL (e.g., 70 for Level 1, 54 for Level 2)
+        time_horizon_steps: number of timesteps to look ahead (e.g., 3 for 15min, 6 for 30min, 12 for 60min)
+        glucose_mean: mean glucose value for denormalization
+        glucose_std: std glucose value for denormalization
+    
+    Returns:
+        auroc: AUROC score
+        fpr: False positive rates for ROC curve
+        tpr: True positive rates for ROC curve
+        thresholds: Threshold values for ROC curve
+    """
+    # Denormalize predictions and ground truth to mg/dL
+    pred_denorm = denormalize_glucose(pred, glucose_mean, glucose_std)
+    true_denorm = denormalize_glucose(true, glucose_mean, glucose_std)
+    
+    # Ensure we have enough timesteps for the time horizon
+    if pred_denorm.shape[-2] < time_horizon_steps:
+        time_horizon_steps = pred_denorm.shape[-2]
+    
+    # Get predictions and ground truth for all future timesteps up to horizon
+    pred_future = pred_denorm[:, :time_horizon_steps, -1]  # [batch, time_horizon, glucose_channel]
+    true_future = true_denorm[:, :time_horizon_steps, -1]  # [batch, time_horizon, glucose_channel]
+    
+    # Use minimum predicted glucose value as confidence score for hypoglycemia risk
+    # Lower values indicate higher risk of hypoglycemia
+    pred_min_glucose = np.min(pred_future, axis=1)
+    
+    # Binary labels: true if ANY future timestep is below threshold
+    true_labels = np.any(true_future < threshold_mg_dl, axis=1).astype(int)
+    
+    # Calculate AUROC if we have both positive and negative samples
+    if len(np.unique(true_labels)) > 1:
+        # Use negative of min glucose as score (higher score = higher risk)
+        risk_scores = -pred_min_glucose
+        
+        # Calculate AUROC
+        auroc = roc_auc_score(true_labels, risk_scores)
+        
+        # Get ROC curve data for plotting
+        fpr, tpr, thresholds = roc_curve(true_labels, risk_scores)
+        
+        return auroc, fpr, tpr, thresholds
+    else:
+        # Cannot calculate AUROC with only one class
+        return 0.0, np.array([0, 1]), np.array([0, 1]), np.array([0])
 
 
 def hypoglycemia_metrics(pred, true, glucose_mean=144.91148743, glucose_std=55.13396884):
@@ -320,19 +377,104 @@ def hypoglycemia_metrics(pred, true, glucose_mean=144.91148743, glucose_std=55.1
                     pred, true, threshold_value, horizon_steps, glucose_mean, glucose_std
                 )
                 
+                auroc, _, _, _ = hypoglycemia_auroc(
+                    pred, true, threshold_value, horizon_steps, glucose_mean, glucose_std
+                )
+                
                 results[f'{threshold_name}_{horizon_name}_sensitivity'] = sensitivity
                 results[f'{threshold_name}_{horizon_name}_specificity'] = specificity
                 results[f'{threshold_name}_{horizon_name}_ppv'] = ppv
                 results[f'{threshold_name}_{horizon_name}_npv'] = npv
+                results[f'{threshold_name}_{horizon_name}_auroc'] = auroc
                 
-            except Exception as e:
+            except Exception:
                 # Handle cases where metrics cannot be calculated
                 results[f'{threshold_name}_{horizon_name}_sensitivity'] = 0.0
                 results[f'{threshold_name}_{horizon_name}_specificity'] = 0.0
                 results[f'{threshold_name}_{horizon_name}_ppv'] = 0.0
                 results[f'{threshold_name}_{horizon_name}_npv'] = 0.0
+                results[f'{threshold_name}_{horizon_name}_auroc'] = 0.0
     
     return results
+
+
+def plot_hypoglycemia_roc_curves(pred, true, glucose_mean=144.91148743, glucose_std=55.13396884,
+                                 save_path=None):
+    """
+    Plot ROC curves for hypoglycemia prediction at different time horizons and thresholds.
+    
+    Args:
+        pred: predictions (normalized glucose values)
+        true: ground truth (normalized glucose values)
+        glucose_mean: mean glucose value for denormalization
+        glucose_std: std glucose value for denormalization
+        save_path: optional path to save the figure
+    
+    Returns:
+        Dictionary of AUROC scores for each condition
+    """
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    axes = axes.flatten()
+    
+    # Define thresholds and time horizons
+    thresholds = {
+        'Level 1 (70 mg/dL)': 70.0,
+        'Level 2 (54 mg/dL)': 54.0
+    }
+    
+    time_horizons = {
+        '15 min': 3,
+        '30 min': 6,
+        '60 min': 12
+    }
+    
+    auroc_scores = {}
+    plot_idx = 0
+    
+    for threshold_name, threshold_value in thresholds.items():
+        for horizon_name, horizon_steps in time_horizons.items():
+            ax = axes[plot_idx]
+            
+            try:
+                # Get AUROC and ROC curve data
+                auroc, fpr, tpr, _ = hypoglycemia_auroc(
+                    pred, true, threshold_value, horizon_steps, glucose_mean, glucose_std
+                )
+                
+                # Store AUROC score
+                key = f'{threshold_name}_{horizon_name}'
+                auroc_scores[key] = auroc
+                
+                # Plot ROC curve
+                ax.plot(fpr, tpr, 'b-', linewidth=2, label=f'AUROC = {auroc:.3f}')
+                ax.plot([0, 1], [0, 1], 'r--', linewidth=1, label='Random (AUROC = 0.5)')
+                
+                ax.set_xlabel('False Positive Rate', fontsize=10)
+                ax.set_ylabel('True Positive Rate', fontsize=10)
+                ax.set_title(f'{threshold_name} - {horizon_name} Horizon', fontsize=11, fontweight='bold')
+                ax.legend(loc='lower right')
+                ax.grid(True, alpha=0.3)
+                ax.set_xlim([0, 1])
+                ax.set_ylim([0, 1])
+                
+            except Exception as e:
+                # Handle cases where AUROC cannot be calculated
+                ax.text(0.5, 0.5, 'Insufficient data\nfor ROC curve', 
+                       ha='center', va='center', fontsize=10)
+                ax.set_title(f'{threshold_name} - {horizon_name} Horizon', fontsize=11, fontweight='bold')
+                auroc_scores[f'{threshold_name}_{horizon_name}'] = 0.0
+            
+            plot_idx += 1
+    
+    plt.suptitle('Hypoglycemia Prediction ROC Curves', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    
+    plt.show()
+    
+    return auroc_scores
 
 
 def metric(pred, true):
