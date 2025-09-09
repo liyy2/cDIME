@@ -1,8 +1,8 @@
 <div align="center">
   <!-- <h1><b> Time-LLM </b></h1> -->
   <!-- <h2><b> Time-LLM </b></h2> -->
-  <h2><b> cDIME: Conditional Diffusion Mixture of Experts </b></h2>
-  <h3><b> Probabilistic Time Series Forecasting via Conditional Diffusion and Flow Matching </b></h3>
+  <h2><b> CAMEO (Context-Aware Mixture of Experts Flow) </b></h2>
+  <h3><b> Probabilistic Time Series Forecasting via Context-Aware Flow Matching </b></h3>
 </div>
 <p align="center">
 <img src="./figures/architecture.png" height = "400" alt="cDIME Architecture" align=center />
