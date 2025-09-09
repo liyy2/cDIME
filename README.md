@@ -11,13 +11,12 @@
 
 ## Introduction
 
-**cDIME** (Conditional Diffusion Mixture of Experts) is a novel framework for probabilistic time series forecasting that leverages conditional diffusion models and flow matching techniques. The framework combines mixture of experts architectures with state-of-the-art generative modeling approaches to produce high-quality probabilistic forecasts with uncertainty quantification.
+**CAMEO** (Context-Aware Mixture of Experts Flow) is a framework for probabilistic time series forecasting that leverages conditional diffusion models and flow matching techniques. The framework combines mixture of experts architectures with state-of-the-art generative modeling approaches to produce high-quality probabilistic forecasts with uncertainty quantification.
 
 
 
 ### Key Features
 
-- **Conditional Diffusion Models**: Employs diffusion processes conditioned on historical time series data and covariates
 - **Flow Matching**: Alternative generative modeling approach using continuous normalizing flows
 - **Mixture of Experts**: Leverages expert specialization for different time series patterns and domains
 - **Uncertainty Quantification**: Provides probabilistic forecasts with confidence intervals
